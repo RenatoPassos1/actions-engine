@@ -70,6 +70,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
         run: |
           {
             echo "GEMINI_API_KEY=${GEMINI_API_KEY}"
@@ -80,6 +81,7 @@ jobs:
             echo "OPENAI_API_KEY=${OPENAI_API_KEY}"
             echo "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}"
             echo "CMC_API_KEY=${CMC_API_KEY}"
+            echo "UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}"
             echo "SITE_URL=https://satoshishouse.com"
             echo "SITE_NAME=Satoshi's House"
           } > .env
