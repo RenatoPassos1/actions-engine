@@ -1,0 +1,151 @@
+# Satoshi's House — Reports (Weekly + Monthly)
+# Clona repo privado via PAT, gera relatórios, commita e faz deploy
+
+name: "Satoshi's House: Generate Reports"
+
+on:
+  schedule:
+    - cron: '0 21 * * 5'
+    - cron: '0 21 28-31 * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Tipo de relatório'
+        required: true
+        default: 'weekly'
+        type: choice
+        options:
+          - weekly
+          - monthly
+          - backfill
+      date:
+        description: 'Data específica (YYYY-MM-DD)'
+        required: false
+        type: string
+
+concurrency:
+  group: satoshis-house-reports
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    name: Generate Reports
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/satoshi-s-house
+          token: ${{ secrets.REPO_PAT }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create .env file
+        run: |
+          cat > .env << ENVEOF
+          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          XAI_API_KEY=${{ secrets.XAI_API_KEY }}
+          LLAMA_API_KEY=${{ secrets.LLAMA_API_KEY }}
+          MISTRAL_API_KEY=${{ secrets.MISTRAL_API_KEY }}
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
+          SITE_URL=https://satoshishouse.com
+          SITE_NAME=Satoshi's House
+          ENVEOF
+
+      - name: "Semanal: Sexta-feira 18h BRT"
+        if: github.event_name == 'schedule' && github.event.schedule == '0 21 * * 5'
+        run: node tools/report-generator.mjs --type weekly
+
+      - name: "Mensal: Verificar último dia do mês"
+        if: github.event_name == 'schedule' && github.event.schedule == '0 21 28-31 * *'
+        id: check_last_day
+        run: |
+          TODAY=$(TZ="America/Sao_Paulo" date +%d)
+          LAST_DAY=$(TZ="America/Sao_Paulo" date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)
+          echo "today=$TODAY" >> $GITHUB_OUTPUT
+          echo "last_day=$LAST_DAY" >> $GITHUB_OUTPUT
+          if [ "$TODAY" = "$LAST_DAY" ]; then
+            echo "is_last_day=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_last_day=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: "Mensal: Gerar relatório mensal"
+        if: github.event_name == 'schedule' && github.event.schedule == '0 21 28-31 * *' && steps.check_last_day.outputs.is_last_day == 'true'
+        run: node tools/report-generator.mjs --type monthly
+
+      - name: "Manual: Weekly"
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'weekly'
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then
+            node tools/report-generator.mjs --type weekly --date "${{ inputs.date }}"
+          else
+            node tools/report-generator.mjs --type weekly
+          fi
+
+      - name: "Manual: Monthly"
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'monthly'
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then
+            node tools/report-generator.mjs --type monthly --date "${{ inputs.date }}"
+          else
+            node tools/report-generator.mjs --type monthly
+          fi
+
+      - name: "Manual: Backfill"
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'backfill'
+        run: node tools/report-generator.mjs --backfill
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git add -A
+          if git diff --staged --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "report_count=0" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            COUNT=$(git diff --staged --name-only | grep "area-membros/insights/.*index.html" | wc -l)
+            echo "report_count=${COUNT}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "Satoshi's House Bot"
+          git config user.email "bot@satoshishouse.com"
+          DATE_BR=$(TZ="America/Sao_Paulo" date +"%d/%m/%Y %H:%M")
+          git commit -m "report: ${{ steps.changes.outputs.report_count }} novos relatórios — ${DATE_BR} BRT"
+          git push
+
+      - name: Deploy to Hostinger via FTP
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.6
+        with:
+          server: ${{ secrets.SH_FTP_HOST }}
+          username: ${{ secrets.SH_FTP_USER }}
+          password: ${{ secrets.SH_FTP_PASS }}
+          protocol: ftps
+          local-dir: ./public_html/
+          server-dir: /public_html/
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            **/_templates/**
+            .env
+            .env.*
+            api/config.php
+            api/db-test.php
+
+      - name: Cleanup .env
+        if: always()
+        run: rm -f .env

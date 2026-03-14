@@ -1,0 +1,89 @@
+# Satoshi's House — Newsletter
+# Clona repo privado via PAT e envia newsletter
+
+name: "Satoshi's House: Send Newsletter"
+
+on:
+  schedule:
+    - cron: '0 21 * * 5'
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Modo teste (não envia emails de verdade)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  send-newsletter:
+    name: Enviar Newsletter
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/satoshi-s-house
+          token: ${{ secrets.REPO_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: newsletter/requirements.txt
+
+      - name: Instalar dependências
+        run: pip install -r newsletter/requirements.txt
+
+      - name: Dry-run — validar conteúdo
+        working-directory: newsletter
+        run: python src/send_newsletter.py
+        env:
+          API_URL:    ${{ secrets.NL_API_URL }}
+          API_KEY:    ${{ secrets.NL_API_KEY }}
+          SMTP_HOST:  ${{ secrets.NL_SMTP_HOST }}
+          SMTP_PORT:  ${{ secrets.NL_SMTP_PORT }}
+          SMTP_USER:  ${{ secrets.NL_SMTP_USER }}
+          SMTP_PASS:  ${{ secrets.NL_SMTP_PASS }}
+          FROM_EMAIL: ${{ secrets.NL_FROM_EMAIL }}
+          FROM_NAME:  ${{ secrets.NL_FROM_NAME }}
+          SITE_URL:   ${{ secrets.NL_SITE_URL }}
+          SEND_DELAY: '2'
+          DRY_RUN:    'true'
+
+      - name: Enviar Newsletter (com retry)
+        working-directory: newsletter
+        run: |
+          MAX_ATTEMPTS=5
+          RETRY_DELAY=1800
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "=== Tentativa $attempt de $MAX_ATTEMPTS ==="
+            if python src/send_newsletter.py; then
+              echo "Newsletter enviada com sucesso na tentativa $attempt"
+              exit 0
+            fi
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "Falha na tentativa $attempt. Aguardando ${RETRY_DELAY}s antes de tentar novamente..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          echo "Todas as $MAX_ATTEMPTS tentativas falharam."
+          exit 1
+        env:
+          API_URL:    ${{ secrets.NL_API_URL }}
+          API_KEY:    ${{ secrets.NL_API_KEY }}
+          SMTP_HOST:  ${{ secrets.NL_SMTP_HOST }}
+          SMTP_PORT:  ${{ secrets.NL_SMTP_PORT }}
+          SMTP_USER:  ${{ secrets.NL_SMTP_USER }}
+          SMTP_PASS:  ${{ secrets.NL_SMTP_PASS }}
+          FROM_EMAIL: ${{ secrets.NL_FROM_EMAIL }}
+          FROM_NAME:  ${{ secrets.NL_FROM_NAME }}
+          SITE_URL:   ${{ secrets.NL_SITE_URL }}
+          SEND_DELAY: '2'
+          DRY_RUN:    ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}

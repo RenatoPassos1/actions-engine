@@ -1,0 +1,175 @@
+# Satoshi's House — Generate & Deploy (centralizado)
+# Clona repo privado via PAT, gera artigos, commita e faz deploy
+# Frequência: A cada hora, 24x/dia
+
+name: "Satoshi's House: Generate & Deploy"
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Generation mode'
+        required: false
+        default: 'quick'
+        type: choice
+        options:
+          - quick
+          - full
+          - custom
+      news_count:
+        description: 'News articles (custom mode)'
+        required: false
+        default: '3'
+        type: string
+      seo_count:
+        description: 'SEO articles (custom mode)'
+        required: false
+        default: '2'
+        type: string
+      pillar_count:
+        description: 'Pillar guides (custom mode)'
+        required: false
+        default: '0'
+        type: string
+
+concurrency:
+  group: satoshis-house-content
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    name: Generate Articles
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      has_changes: ${{ steps.changes.outputs.has_changes }}
+      article_count: ${{ steps.changes.outputs.article_count }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/satoshi-s-house
+          token: ${{ secrets.REPO_PAT }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create .env file
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          LLAMA_API_KEY: ${{ secrets.LLAMA_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+        run: |
+          {
+            echo "GEMINI_API_KEY=${GEMINI_API_KEY}"
+            echo "GROQ_API_KEY=${GROQ_API_KEY}"
+            echo "XAI_API_KEY=${XAI_API_KEY}"
+            echo "LLAMA_API_KEY=${LLAMA_API_KEY}"
+            echo "MISTRAL_API_KEY=${MISTRAL_API_KEY}"
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}"
+            echo "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}"
+            echo "CMC_API_KEY=${CMC_API_KEY}"
+            echo "SITE_URL=https://satoshishouse.com"
+            echo "SITE_NAME=Satoshi's House"
+          } > .env
+
+      # --- SCHEDULED RUNS ---
+      - name: "Generate 2 news articles"
+        if: github.event_name == 'schedule'
+        run: node tools/run-pipeline.mjs --news 2 --seo 0 --pillar 0
+
+      # --- MANUAL RUNS ---
+      - name: "Manual: quick"
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'quick'
+        run: node tools/run-pipeline.mjs --quick
+
+      - name: "Manual: full"
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
+        run: node tools/run-pipeline.mjs
+
+      - name: "Manual: custom"
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'custom'
+        env:
+          NEWS_COUNT: ${{ inputs.news_count }}
+          SEO_COUNT: ${{ inputs.seo_count }}
+          PILLAR_COUNT: ${{ inputs.pillar_count }}
+        run: |
+          node tools/run-pipeline.mjs \
+            --news "$NEWS_COUNT" \
+            --seo "$SEO_COUNT" \
+            --pillar "$PILLAR_COUNT"
+
+      # --- POST-GENERATION ---
+      - name: Update crypto quotes
+        continue-on-error: true
+        run: node tools/generate-quotes-cmc.mjs || echo "Quotes skipped"
+
+      - name: Validate generated content
+        run: node tools/validate-content.mjs
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git add -A
+          if git diff --staged --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "article_count=0" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            COUNT=$(git diff --staged --name-only | grep "public_html/noticias/.*index.html" | wc -l)
+            echo "article_count=${COUNT}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          DATE_BR=$(TZ="America/Sao_Paulo" date +"%d/%m/%Y %H:%M")
+          git commit -m "content: ${{ steps.changes.outputs.article_count }} novos artigos — ${DATE_BR} BRT"
+          git push
+
+      - name: Cleanup .env
+        if: always()
+        run: rm -f .env
+
+  deploy:
+    name: Deploy to Hostinger
+    needs: generate
+    if: needs.generate.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SH_SSH_HOST }}
+          username: ${{ secrets.SH_SSH_USER }}
+          password: ${{ secrets.SH_SSH_PASS }}
+          port: ${{ secrets.SH_SSH_PORT }}
+          script: |
+            cd ~/satoshis-house-repo
+            git fetch origin main
+            git reset --hard origin/main
+            rsync -a --delete --exclude=.git --exclude=api/config.php ~/satoshis-house-repo/public_html/ ~/domains/satoshishouse.com/public_html/
+            echo "Deploy OK — $(date)"
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Deploy concluido!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artigos gerados:** ${{ needs.generate.outputs.article_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://satoshishouse.com" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,93 @@
+# Site Notícias Bot — Update News Feed
+# Clona repo privado via PAT, atualiza feed, commita e faz deploy
+
+name: "Notícias Bot: Update News Feed"
+
+on:
+  schedule:
+    - cron: "0 11 * * *"
+    - cron: "0 15 * * *"
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+
+jobs:
+  update-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/site-noticias-bot
+          token: ${{ secrets.REPO_PAT }}
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run news update script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+        run: node scripts/update-news.mjs
+
+      - name: Commit updated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/noticias.json public/noticias.html data/cache.json
+          git diff --cached --quiet || git commit -m "chore: update news feed $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
+
+      - name: Install lftp
+        run: sudo apt-get update && sudo apt-get install -y lftp
+
+      - name: Deploy to Hostinger via FTP
+        env:
+          FTP_HOST: ${{ secrets.NB_FTP_HOST }}
+          FTP_USER: ${{ secrets.NB_FTP_USER }}
+          FTP_PASS: ${{ secrets.NB_FTP_PASS }}
+          REMOTE_DIR: ${{ secrets.NB_REMOTE_DIR }}
+        timeout-minutes: 3
+        run: |
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ssl:verify-certificate no
+          set ftp:passive-mode yes
+          set net:timeout 30
+          set net:max-retries 2
+          set net:reconnect-interval-base 5
+          cd ${REMOTE_DIR:-/public_html}
+          put public/noticias.json
+          put public/noticias.html
+          bye
+          EOF
+          echo "Deploy concluído!"
+
+      - name: Deploy fallback (retry)
+        if: failure()
+        env:
+          FTP_HOST: ${{ secrets.NB_FTP_HOST }}
+          FTP_USER: ${{ secrets.NB_FTP_USER }}
+          FTP_PASS: ${{ secrets.NB_FTP_PASS }}
+          REMOTE_DIR: ${{ secrets.NB_REMOTE_DIR }}
+        timeout-minutes: 3
+        run: |
+          sleep 10
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ssl:verify-certificate no
+          set ftp:passive-mode yes
+          set net:timeout 30
+          set net:max-retries 2
+          cd ${REMOTE_DIR:-/public_html}
+          put public/noticias.json
+          put public/noticias.html
+          bye
+          EOF
+          echo "Deploy (retry) concluído!"

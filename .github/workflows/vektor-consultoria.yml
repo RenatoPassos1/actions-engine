@@ -1,0 +1,174 @@
+# Vektor Consultoria — RevOps News Weekly + Generate Articles
+# Clona repos privados via PAT
+
+name: "Vektor: RevOps News + Articles"
+
+on:
+  schedule:
+    # RevOps News Weekly: Segunda 08:00 BRT
+    - cron: '0 11 * * 1'
+    # Generate Articles: 3x/dia (20 min após news bot)
+    - cron: "20 11 * * *"
+    - cron: "20 15 * * *"
+    - cron: "20 21 * * *"
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Tarefa a executar'
+        required: true
+        default: 'articles'
+        type: choice
+        options:
+          - articles
+          - revops
+      count:
+        description: 'Quantidade de artigos (revops)'
+        required: false
+        default: '5'
+        type: string
+
+jobs:
+  # ============================================================
+  # JOB 1: Generate Article Pages (3x/dia)
+  # Roda no repo VEKTOR-WEB-BACKUP
+  # ============================================================
+  generate-articles:
+    name: Generate Article Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event_name == 'schedule' && github.event.schedule != '0 11 * * 1'
+      || (github.event_name == 'workflow_dispatch' && inputs.task == 'articles')
+
+    steps:
+      - name: Checkout VEKTOR-WEB-BACKUP
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/VEKTOR-WEB-BACKUP
+          token: ${{ secrets.REPO_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download latest noticias.json
+        working-directory: site-vektor-consultoria
+        run: |
+          curl -sL "https://vektorconsultoria.com/noticias.json" -o public_html/noticias.json
+          echo "noticias.json baixado ($(wc -c < public_html/noticias.json) bytes)"
+
+      - name: Check for new articles
+        id: check
+        working-directory: site-vektor-consultoria
+        run: |
+          if git diff --quiet public_html/noticias.json; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Nenhum artigo novo — pulando."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Artigos novos detectados — gerando páginas…"
+          fi
+
+      - name: Generate article pages
+        if: steps.check.outputs.skip == 'false'
+        working-directory: site-vektor-consultoria
+        run: python tools/generate_news_pages.py --no-trends
+
+      - name: Commit changes
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add site-vektor-consultoria/public_html/noticias.json site-vektor-consultoria/public_html/noticias/ site-vektor-consultoria/public_html/sitemap.xml
+          git diff --cached --quiet || git commit -m "chore: generate article pages $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
+
+      - name: Install lftp
+        if: steps.check.outputs.skip == 'false'
+        run: sudo apt-get update && sudo apt-get install -y lftp
+
+      - name: Deploy articles to Hostinger via FTP
+        if: steps.check.outputs.skip == 'false'
+        env:
+          FTP_HOST: ${{ secrets.VK_FTP_HOST }}
+          FTP_USER: ${{ secrets.VK_FTP_USER }}
+          FTP_PASS: ${{ secrets.VK_FTP_PASS }}
+        timeout-minutes: 3
+        working-directory: site-vektor-consultoria
+        run: |
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ssl:verify-certificate no
+          set ftp:passive-mode yes
+          set net:timeout 30
+          set net:max-retries 2
+          set net:reconnect-interval-base 5
+          cd /public_html
+          mirror -R --only-newer --verbose public_html/noticias /public_html/noticias
+          put public_html/noticias.json
+          put public_html/sitemap.xml
+          bye
+          EOF
+          echo "Deploy de artigos concluído!"
+
+  # ============================================================
+  # JOB 2: RevOps News Weekly (segunda-feira)
+  # Roda no repo vektor-consultoria
+  # ============================================================
+  revops-news:
+    name: RevOps News Weekly
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      github.event_name == 'schedule' && github.event.schedule == '0 11 * * 1'
+      || (github.event_name == 'workflow_dispatch' && inputs.task == 'revops')
+
+    env:
+      GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY:     ${{ secrets.GROQ_API_KEY }}
+      MISTRAL_API_KEY:  ${{ secrets.MISTRAL_API_KEY }}
+      REVOPS_OPENAI_KEY: ${{ secrets.REVOPS_OPENAI_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+    steps:
+      - name: Checkout vektor-consultoria
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/vektor-consultoria
+          token: ${{ secrets.REPO_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install google-genai groq mistralai openai pytrends
+
+      - name: Generate RevOps articles
+        run: |
+          COUNT=${{ github.event.inputs.count || '5' }}
+          CMD="python tools/revops_news_auto.py --count $COUNT --regenerate"
+          echo "Running: $CMD"
+          $CMD
+
+      - name: Commit generated content
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public_html/noticias.json public_html/noticias/ public_html/sitemap.xml
+          git diff --staged --quiet || git commit -m "auto: novos artigos RevOps [$(date +%Y-%m-%d)]"
+          git push
+
+      - name: Deploy to Hostinger via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.VK_FTP_HOST }}
+          username: ${{ secrets.VK_FTP_USER }}
+          password: ${{ secrets.VK_FTP_PASS }}
+          local-dir: ./public_html/
+          server-dir: /public_html/
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
