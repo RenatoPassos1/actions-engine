@@ -1,6 +1,6 @@
 # Plataforma Educa — Deploy Vercel (manual + on push)
 # Faz deploy do repo privado plataforma-educa para Vercel Production
-# Usa actions-engine (público) para não consumir minutos do plano Free
+# Build roda nos servidores da Vercel (igual deploy via Git)
 
 name: "Plataforma Educa: Deploy Vercel"
 
@@ -28,33 +28,17 @@ jobs:
           ref: main
           fetch-depth: 1
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
-      - name: Pull Vercel environment
-        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+      - name: Link Vercel project
+        run: vercel link --yes --project=${{ secrets.PE_VERCEL_PROJECT_ID }} --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.PE_VERCEL_PROJECT_ID }}
-
-      - name: Build project
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.PE_VERCEL_PROJECT_ID }}
 
       - name: Deploy to Vercel Production
         run: |
-          DEPLOY_URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }} 2>&1)
+          DEPLOY_URL=$(vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tail -1)
           echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
           echo "Deploy URL: $DEPLOY_URL"
         env:
