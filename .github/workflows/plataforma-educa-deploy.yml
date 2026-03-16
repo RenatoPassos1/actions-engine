@@ -1,0 +1,71 @@
+# Plataforma Educa — Deploy Vercel (manual + on push)
+# Faz deploy do repo privado plataforma-educa para Vercel Production
+# Usa actions-engine (público) para não consumir minutos do plano Free
+
+name: "Plataforma Educa: Deploy Vercel"
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [plataforma-educa-deploy]
+
+concurrency:
+  group: plataforma-educa-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Vercel Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/plataforma-educa
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Pull Vercel environment
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PE_VERCEL_PROJECT_ID }}
+
+      - name: Build project
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PE_VERCEL_PROJECT_ID }}
+
+      - name: Deploy to Vercel Production
+        run: |
+          DEPLOY_URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }} 2>&1)
+          echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
+          echo "Deploy URL: $DEPLOY_URL"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PE_VERCEL_PROJECT_ID }}
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Deploy concluido!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://plataformaeduca.com" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deploy URL:** $DEPLOY_URL" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** $(git log --oneline -1)" >> $GITHUB_STEP_SUMMARY
