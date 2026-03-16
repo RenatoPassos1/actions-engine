@@ -31,14 +31,16 @@ jobs:
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
-      - name: Link Vercel project
-        run: vercel link --yes --project=${{ secrets.PE_VERCEL_PROJECT_ID }} --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      - name: Create Vercel project link
+        run: |
+          mkdir -p .vercel
+          echo '{"orgId":"${{ secrets.VERCEL_ORG_ID }}","projectId":"${{ secrets.PE_VERCEL_PROJECT_ID }}"}' > .vercel/project.json
+          cat .vercel/project.json
 
       - name: Deploy to Vercel Production
         run: |
-          DEPLOY_URL=$(vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tail -1)
+          vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tee /tmp/deploy.log
+          DEPLOY_URL=$(grep -oP 'https://[^\s]+\.vercel\.app' /tmp/deploy.log | tail -1)
           echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
           echo "Deploy URL: $DEPLOY_URL"
         env:
