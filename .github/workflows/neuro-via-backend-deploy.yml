@@ -32,7 +32,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote add hf https://renatopassos:${HF_TOKEN}@huggingface.co/spaces/renatopassos/neuro-via-backend
+          git remote add hf https://renatopassos:${HF_TOKEN}@huggingface.co/spaces/renatopassos/neuro-via
           git push hf main --force
           echo "Pushed to HF Spaces successfully"
 
@@ -41,5 +41,5 @@ jobs:
         run: |
           echo "### Backend Deploy concluido!" >> $GITHUB_STEP_SUMMARY
           echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
-          echo "- **HF Space:** https://huggingface.co/spaces/renatopassos/neuro-via-backend" >> $GITHUB_STEP_SUMMARY
+          echo "- **HF Space:** https://huggingface.co/spaces/renatopassos/neuro-via" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit:** $(git log --oneline -1)" >> $GITHUB_STEP_SUMMARY
