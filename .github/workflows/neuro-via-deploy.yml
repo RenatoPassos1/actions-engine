@@ -1,0 +1,61 @@
+# Neuro Via — Build & Deploy to Hostinger
+# Clona repo privado via PAT, faz build e deploy
+# Trigger: repository_dispatch (via push no repo privado) ou manual
+
+name: "Neuro Via: Build & Deploy"
+
+on:
+  repository_dispatch:
+    types: [neuro-via-deploy]
+  workflow_dispatch:
+
+concurrency:
+  group: neuro-via-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build & Deploy to Hostinger
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/neuro-via
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy dist/ via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.NV_SSH_HOST }}
+          username: ${{ secrets.NV_SSH_USER }}
+          password: ${{ secrets.NV_SSH_PASS }}
+          port: ${{ secrets.NV_SSH_PORT }}
+          source: "dist/*"
+          target: "~/domains/neuroviaapp.com/public_html/"
+          strip_components: 1
+          overwrite: true
+          rm: true
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Deploy concluido!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://neuroviaapp.com" >> $GITHUB_STEP_SUMMARY
