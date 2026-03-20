@@ -1,0 +1,45 @@
+# Neuro Via Backend — Deploy to Hugging Face Spaces
+# Clona repo privado e faz push para HF Spaces (Docker build acontece lá)
+# Trigger: repository_dispatch ou manual
+
+name: "Neuro Via: Backend Deploy (HF Spaces)"
+
+on:
+  repository_dispatch:
+    types: [neuro-via-backend-deploy]
+  workflow_dispatch:
+
+concurrency:
+  group: neuro-via-backend-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to HF Spaces
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/neuro-via
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 0
+
+      - name: Push to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git remote add hf https://renatopassos:${HF_TOKEN}@huggingface.co/spaces/renatopassos/neuro-via-backend
+          git push hf main --force
+          echo "Pushed to HF Spaces successfully"
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Backend Deploy concluido!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **HF Space:** https://huggingface.co/spaces/renatopassos/neuro-via-backend" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** $(git log --oneline -1)" >> $GITHUB_STEP_SUMMARY
