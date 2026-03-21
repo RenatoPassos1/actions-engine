@@ -1,0 +1,26 @@
+# Plataforma Educa — Cron Trigger
+# Dispara os cron jobs no repo privado via repository_dispatch
+
+name: "Plataforma Educa: Cron Trigger"
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+    - cron: "0 5 1 * *"
+    - cron: "0 6 * * *"
+    - cron: "0 8 * * *"
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch to private repo
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.REPO_PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/RenatoPassos1/plataforma-educa/dispatches" \
+            -d "{\"event_type\":\"cron\",\"client_payload\":{\"schedule\":\"${{ github.event.schedule }}\"}}"
