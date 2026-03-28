@@ -1,0 +1,88 @@
+# FlashFlow — Deploy Engine to Oracle VM
+# Clona repo privado, compila Rust via SSH na VM, reinicia service
+# Trigger: repository_dispatch (from FlashFlow repo webhook) ou manual
+
+name: "FlashFlow: Deploy Engine"
+
+on:
+  repository_dispatch:
+    types: [flashflow-deploy]
+  workflow_dispatch:
+    inputs:
+      skip_build:
+        description: "Skip cargo build (just restart service)"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: flashflow-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Oracle VM
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.FLASHFLOW_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.FLASHFLOW_VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull latest code on VM
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.FLASHFLOW_VM_USER }}@${{ secrets.FLASHFLOW_VM_HOST }} \
+            "cd ~/flashflow && \
+             git pull https://${{ secrets.REPO_PAT }}@github.com/RenatoPassos1/FlashFlow.git main && \
+             git remote set-url origin https://github.com/RenatoPassos1/FlashFlow.git && \
+             echo 'Pull OK — $(git log --oneline -1)'"
+
+      - name: Build engine (release)
+        if: ${{ github.event.inputs.skip_build != 'true' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            ${{ secrets.FLASHFLOW_VM_USER }}@${{ secrets.FLASHFLOW_VM_HOST }} \
+            "source ~/.cargo/env && \
+             cd ~/flashflow/engine && \
+             cargo build --release 2>&1 | tail -5 && \
+             echo 'Build OK — $(ls -lh target/release/flashflow | awk \"{print \\$5}\")'"
+
+      - name: Restart service
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.FLASHFLOW_VM_USER }}@${{ secrets.FLASHFLOW_VM_HOST }} \
+            "sudo systemctl restart flashflow-testnet && \
+             sleep 3 && \
+             if systemctl is-active --quiet flashflow-testnet; then
+               echo 'Service running'
+               curl -sf http://127.0.0.1:3002/api/health || echo 'API not responding yet'
+             else
+               echo 'ERROR: Service failed to start!'
+               sudo journalctl -u flashflow-testnet --no-pager -n 20
+               exit 1
+             fi"
+
+      - name: Health check
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.FLASHFLOW_VM_USER }}@${{ secrets.FLASHFLOW_VM_HOST }} \
+            "sleep 5 && curl -sf http://127.0.0.1:3002/api/health && echo '' && echo 'Health OK'"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### FlashFlow Deploy OK" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **VM:** Oracle Cloud (ARM64)" >> $GITHUB_STEP_SUMMARY
+          echo "- **API:** http://${{ secrets.FLASHFLOW_VM_HOST }}:3002/api/health" >> $GITHUB_STEP_SUMMARY
