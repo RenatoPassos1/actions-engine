@@ -1,0 +1,83 @@
+# Fides Protocol â€” Deploy to Digital Ocean VM
+# Triggered via repository_dispatch from fides-protocol repo (private)
+# Runs in public repo = minutos ilimitados
+
+name: "Fides Protocol: Deploy"
+
+on:
+  repository_dispatch:
+    types: [fides-protocol-deploy]
+  workflow_dispatch:
+
+concurrency:
+  group: fides-protocol-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Digital Ocean VM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.FIDES_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.FIDES_VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull latest code
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
+            "cd /root/fides-protocol/app && \
+             git pull https://${{ secrets.REPO_PAT }}@github.com/RenatoPassos1/fides-protocol.git main && \
+             git remote set-url origin https://github.com/RenatoPassos1/fides-protocol.git && \
+             echo 'Pull OK â€” $(git log --oneline -1)'"
+
+      - name: Build
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
+            "cd /root/fides-protocol/app && pnpm turbo build 2>&1 | tail -10"
+
+      - name: Copy Next.js static assets to standalone
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
+            "WEB=/root/fides-protocol/app/apps/web && \
+             STANDALONE=\$WEB/.next/standalone/apps/web && \
+             cp -r \$WEB/.next/static \$STANDALONE/.next/static && \
+             if [ -d \$WEB/public ]; then cp -r \$WEB/public \$STANDALONE/public; fi && \
+             echo 'Static assets copied'"
+
+      - name: Restart PM2
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
+            "pm2 restart all && sleep 5 && pm2 list"
+
+      - name: Health check
+        run: |
+          sleep 5
+          STATUS=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
+            "curl -sf https://api.fidesprotocol.com/health && echo OK || echo FAIL")
+          echo "Health: $STATUS"
+          echo "$STATUS" | grep -q OK || exit 1
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Fides Protocol Deploy OK" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **API:** https://api.fidesprotocol.com/health" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://fidesprotocol.com" >> $GITHUB_STEP_SUMMARY
