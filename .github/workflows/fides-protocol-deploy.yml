@@ -27,48 +27,40 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.FIDES_VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Pull latest code
-        run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
-            "cd /root/fides-protocol/app && \
-             git pull https://${{ secrets.REPO_PAT }}@github.com/RenatoPassos1/fides-protocol.git main && \
-             git remote set-url origin https://github.com/RenatoPassos1/fides-protocol.git && \
-             echo 'Pull OK â€” $(git log --oneline -1)'"
-
-      - name: Build
+      - name: Pull, build and restart
         run: |
           ssh -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=no \
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=10 \
-            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
-            "cd /root/fides-protocol/app && pnpm turbo build 2>&1 | tail -10"
+            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} << 'REMOTE'
+          set -e
+          cd /root/fides-protocol/app
 
-      - name: Copy Next.js static assets to standalone
-        run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
-            "WEB=/root/fides-protocol/app/apps/web && \
-             STANDALONE=\$WEB/.next/standalone/apps/web && \
-             cp -r \$WEB/.next/static \$STANDALONE/.next/static && \
-             if [ -d \$WEB/public ]; then cp -r \$WEB/public \$STANDALONE/public; fi && \
-             echo 'Static assets copied'"
+          echo "==> git pull"
+          git pull origin main
 
-      - name: Restart PM2
-        run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
-            "pm2 restart all && sleep 5 && pm2 list"
+          echo "==> pnpm turbo build"
+          pnpm turbo build 2>&1 | tail -10
+
+          echo "==> Copy _next/static to standalone"
+          WEB=/root/fides-protocol/app/apps/web
+          STANDALONE=$WEB/.next/standalone/apps/web
+          cp -r $WEB/.next/static $STANDALONE/.next/static
+          if [ -d $WEB/public ]; then cp -r $WEB/public $STANDALONE/public; fi
+
+          echo "==> pm2 restart all"
+          pm2 restart all
+          sleep 6
+          pm2 list
+          REMOTE
 
       - name: Health check
         run: |
           sleep 5
-          STATUS=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.FIDES_VM_USER }}@${{ secrets.FIDES_VM_HOST }} \
-            "curl -sf https://api.fidesprotocol.com/health && echo OK || echo FAIL")
-          echo "Health: $STATUS"
-          echo "$STATUS" | grep -q OK || exit 1
+            "curl -sf https://api.fidesprotocol.com/health && echo ' â€” OK' || (echo 'FAIL'; exit 1)"
 
       - name: Cleanup SSH key
         if: always()
