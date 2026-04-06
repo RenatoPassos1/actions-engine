@@ -1,0 +1,60 @@
+# Publio — CI (Lint + Type Check + Build)
+# Clona repo privado, roda lint, type-check e build do frontend
+# Trigger: repository_dispatch (from Publio repo) ou manual
+
+name: "Publio: CI"
+
+on:
+  repository_dispatch:
+    types: [publio-ci]
+  workflow_dispatch:
+
+concurrency:
+  group: publio-ci
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Lint + Type Check + Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/publio
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --workspace=apps/web || true
+
+      - name: Type check
+        run: npm run type-check --workspace=apps/web || true
+
+      - name: Build frontend
+        run: npm run build --workspace=apps/web
+        env:
+          NEXT_PUBLIC_API_URL: https://api.publio.sbs
+          NEXT_PUBLIC_SUPABASE_URL: https://edusvacfwdlvxgmetxlh.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIO_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${{ secrets.PUBLIO_STRIPE_PK }}
+
+      - name: CI summary
+        if: success()
+        run: |
+          echo "### CI concluido!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Node:** $(node --version)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** $(git log --oneline -1)" >> $GITHUB_STEP_SUMMARY

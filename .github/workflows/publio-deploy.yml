@@ -1,0 +1,110 @@
+# Publio — Deploy Frontend (Vercel) + Backend (Render)
+# Clona repo privado, faz deploy do frontend via Vercel CLI
+# e dispara deploy do backend via Render Deploy Hook
+# Trigger: repository_dispatch (from Publio repo) ou manual
+
+name: "Publio: Deploy"
+
+on:
+  repository_dispatch:
+    types: [publio-deploy]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Deploy target"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - frontend
+          - backend
+
+concurrency:
+  group: publio-deploy
+  cancel-in-progress: false
+
+jobs:
+  frontend:
+    if: >-
+      github.event_name == 'repository_dispatch' ||
+      github.event.inputs.target == 'all' ||
+      github.event.inputs.target == 'frontend'
+    name: Deploy Frontend (Vercel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/publio
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Create Vercel project link
+        run: |
+          mkdir -p .vercel
+          echo '{"orgId":"${{ secrets.VERCEL_ORG_ID }}","projectId":"${{ secrets.PUBLIO_VERCEL_PROJECT_ID }}"}' > .vercel/project.json
+          cat .vercel/project.json
+
+      - name: Deploy to Vercel Production
+        run: |
+          vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tee /tmp/deploy.log
+          DEPLOY_URL=$(grep -oP 'https://[^\s]+\.vercel\.app' /tmp/deploy.log | tail -1)
+          echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
+          echo "Deploy URL: $DEPLOY_URL"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PUBLIO_VERCEL_PROJECT_ID }}
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Frontend Deploy concluido!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://publio.sbs" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deploy URL:** $DEPLOY_URL" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** $(git log --oneline -1)" >> $GITHUB_STEP_SUMMARY
+
+  backend:
+    if: >-
+      github.event_name == 'repository_dispatch' ||
+      github.event.inputs.target == 'all' ||
+      github.event.inputs.target == 'backend'
+    name: Deploy Backend (Render)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Trigger Render deploy
+        run: |
+          HTTP_STATUS=$(curl -s -o /tmp/render.log -w "%{http_code}" \
+            -X POST "${{ secrets.PUBLIO_RENDER_DEPLOY_HOOK }}" \
+            -H "Content-Type: application/json")
+          echo "HTTP Status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            echo "Render deploy triggered successfully"
+          else
+            echo "ERROR: Render deploy hook returned $HTTP_STATUS"
+            cat /tmp/render.log
+            exit 1
+          fi
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Backend Deploy triggered!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **API:** https://api.publio.sbs" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform:** Render (auto-build from hook)" >> $GITHUB_STEP_SUMMARY
