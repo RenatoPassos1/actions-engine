@@ -1,0 +1,113 @@
+# UtilizAí — Deploy Manual (trigger Vercel redeploy)
+# Útil quando o auto-deploy via Git falha ou quando precisa rebuild sem novo commit
+#
+# Setup pré-requisito (1x):
+# 1. No Vercel: Settings → Git → Deploy Hooks → Create Hook
+#    Name: "actions-engine" | Branch: main
+#    Copiar URL gerada (https://api.vercel.com/v1/integrations/deploy/...)
+# 2. Neste repo (actions-engine): Settings → Secrets and variables → Actions
+#    Adicionar secret UTILIZAI_VERCEL_DEPLOY_HOOK = URL copiada
+# 3. (Opcional — para monitorar status) adicionar secrets:
+#    VERCEL_TOKEN = token pessoal (https://vercel.com/account/tokens)
+#    VERCEL_TEAM_ID = vektor-webs-projects
+#
+# Actions em repo público = minutos ilimitados. Cota Hobby do Vercel permanece intacta.
+
+name: "UtilizAí: Redeploy (manual)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Motivo do redeploy"
+        required: false
+        default: "Manual redeploy"
+      wait_ready:
+        description: "Aguardar deploy ficar READY (exige VERCEL_TOKEN)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+concurrency:
+  group: utilizai-deploy
+  cancel-in-progress: false
+
+jobs:
+  redeploy:
+    name: Trigger Vercel redeploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Trigger Vercel Deploy Hook
+        id: trigger
+        env:
+          DEPLOY_HOOK: ${{ secrets.UTILIZAI_VERCEL_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "::error::UTILIZAI_VERCEL_DEPLOY_HOOK secret not configured"
+            echo "Setup: Vercel → Settings → Git → Deploy Hooks → create hook for branch 'main'"
+            exit 1
+          fi
+
+          echo "Disparando redeploy via Deploy Hook..."
+          RESPONSE=$(curl -s -X POST "$DEPLOY_HOOK")
+          echo "Response: $RESPONSE"
+
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job.id // empty')
+          if [ -z "$JOB_ID" ]; then
+            echo "::error::Deploy Hook não retornou job.id — verifique a URL do hook"
+            exit 1
+          fi
+
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+          echo "Job criado: $JOB_ID"
+
+      - name: Wait for deployment READY
+        if: ${{ inputs.wait_ready == 'true' && secrets.VERCEL_TOKEN != '' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          PROJECT="utilizai-platform"
+          MAX_CHECKS=30   # 30 * 20s = 10 min
+          CHECK=0
+          STATE="QUEUED"
+
+          while [ "$CHECK" -lt "$MAX_CHECKS" ] && [ "$STATE" != "READY" ] && [ "$STATE" != "ERROR" ] && [ "$STATE" != "CANCELED" ]; do
+            CHECK=$((CHECK + 1))
+            sleep 20
+
+            RESPONSE=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v6/deployments?projectId=$PROJECT&teamId=$VERCEL_TEAM_ID&limit=1")
+
+            STATE=$(echo "$RESPONSE" | jq -r '.deployments[0].state // "UNKNOWN"')
+            URL=$(echo "$RESPONSE" | jq -r '.deployments[0].url // empty')
+            echo "[$CHECK/$MAX_CHECKS] State: $STATE — URL: $URL"
+          done
+
+          if [ "$STATE" = "READY" ]; then
+            echo "deploy_url=https://$URL" >> "$GITHUB_ENV"
+          elif [ "$STATE" = "ERROR" ] || [ "$STATE" = "CANCELED" ]; then
+            echo "::error::Deploy falhou com state=$STATE"
+            exit 1
+          else
+            echo "::warning::Timeout aguardando READY (state=$STATE após $MAX_CHECKS checks)"
+          fi
+
+      - name: Deploy summary
+        if: always()
+        run: |
+          echo "## UtilizAí — Redeploy disparado" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Motivo:** ${{ inputs.reason }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** \`${{ steps.trigger.outputs.job_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Projeto Vercel:** [utilizai-platform](https://vercel.com/vektor-webs-projects/utilizai-platform)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://utilizaí.com" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$deploy_url" ]; then
+            echo "- **Deploy URL:** $deploy_url" >> $GITHUB_STEP_SUMMARY
+          fi
