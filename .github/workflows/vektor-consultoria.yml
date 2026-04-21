@@ -35,7 +35,7 @@ jobs:
   generate-articles:
     name: Generate Article Pages
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     if: >-
       github.event_name == 'schedule' && github.event.schedule != '0 11 * * 1'
       || (github.event_name == 'workflow_dispatch' && inputs.task == 'articles')
