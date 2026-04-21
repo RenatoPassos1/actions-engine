@@ -26,6 +26,9 @@ concurrency:
   group: utilizai-gsc-report
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   report:
     name: GSC Report + Email
