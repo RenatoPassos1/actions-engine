@@ -1,0 +1,90 @@
+# UtilizAí — News Pipeline Cron (backup do cron do Vercel Hobby)
+#
+# Por quê: em 20/04/2026 o cron do Vercel simplesmente não disparou
+# (plano Hobby, deploy churn, sem logs). Actions em repo público =
+# minutos ilimitados, então este workflow mora no actions-engine pra
+# garantir que o pipeline rode mesmo se o Vercel pular.
+#
+# Agenda: 12h UTC (09h BRT), 1h depois do cron do Vercel (11h UTC).
+# Se o cron do Vercel rodou OK, news-ingest dedup por source_url
+# impede duplicatas — rodar 2x no mesmo dia não gera artigos extras.
+#
+# Manual: Actions > "UtilizAí: News Pipeline Cron" > Run workflow.
+#
+# Setup pré-requisito (1x):
+# 1. Neste repo (actions-engine): Settings → Secrets and variables → Actions
+#    Adicionar:
+#      UTILIZAI_CRON_SECRET = mesmo valor configurado no Vercel env var CRON_SECRET
+#    (Opcional) UTILIZAI_APP_URL = URL base (default: https://xn--utiliza-eza.com)
+
+name: "UtilizAí: News Pipeline Cron"
+
+on:
+  schedule:
+    # 12:00 UTC diário = 09:00 BRT. Backup 1h após o cron do Vercel (11h UTC).
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Motivo do disparo manual"
+        required: false
+        default: "Manual trigger"
+
+concurrency:
+  group: utilizai-news-cron
+  cancel-in-progress: false
+
+jobs:
+  trigger-master-cron:
+    name: Call /api/cron/master
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger cron-master endpoint
+        id: trigger
+        env:
+          CRON_SECRET: ${{ secrets.UTILIZAI_CRON_SECRET }}
+          BASE_URL: ${{ vars.UTILIZAI_APP_URL || 'https://xn--utiliza-eza.com' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET}" ]; then
+            echo "::error::UTILIZAI_CRON_SECRET not configured in repo secrets"
+            exit 1
+          fi
+          echo "Triggering ${BASE_URL}/api/cron/master"
+          RESPONSE_FILE=$(mktemp)
+          HTTP_CODE=$(curl -sS -o "${RESPONSE_FILE}" -w "%{http_code}" \
+            --max-time 320 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${BASE_URL}/api/cron/master")
+          echo "HTTP status: ${HTTP_CODE}"
+          echo "--- Response body ---"
+          cat "${RESPONSE_FILE}"
+          echo ""
+          echo "---------------------"
+          echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::Cron returned HTTP ${HTTP_CODE} (esperado 200)"
+            exit 1
+          fi
+
+      - name: Verify pipeline health after run
+        if: always()
+        env:
+          BASE_URL: ${{ vars.UTILIZAI_APP_URL || 'https://xn--utiliza-eza.com' }}
+        run: |
+          set -eu
+          echo "Checking /api/cron/health..."
+          curl -sS -o health.json -w "HTTP %{http_code}\n" "${BASE_URL}/api/cron/health" || true
+          cat health.json 2>/dev/null || echo "(sem resposta)"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## UtilizAí — News Pipeline Cron" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cron trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **HTTP status:** \`${{ steps.trigger.outputs.http_code }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://utilizaí.com" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health:** https://xn--utiliza-eza.com/api/cron/health" >> $GITHUB_STEP_SUMMARY
