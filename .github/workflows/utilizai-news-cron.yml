@@ -1,28 +1,38 @@
-# UtilizAí — News Pipeline Cron (backup do cron do Vercel Hobby)
+# UtilizAí — News Pipeline Cron (fonte primária)
 #
-# Por quê: em 20/04/2026 o cron do Vercel simplesmente não disparou
-# (plano Hobby, deploy churn, sem logs). Actions em repo público =
-# minutos ilimitados, então este workflow mora no actions-engine pra
-# garantir que o pipeline rode mesmo se o Vercel pular.
+# Histórico: em 20/04/2026 o cron do Vercel Hobby não disparou (silent fail,
+# sem logs, sem alerta). Workflow original no Vercel foi aposentado em
+# 21/04/2026 — passamos a depender EXCLUSIVAMENTE de GitHub Actions em
+# repo público (minutos ilimitados, logs completos, history pública).
 #
-# Agenda: 12h UTC (09h BRT), 1h depois do cron do Vercel (11h UTC).
-# Se o cron do Vercel rodou OK, news-ingest dedup por source_url
-# impede duplicatas — rodar 2x no mesmo dia não gera artigos extras.
+# Agenda: 4 runs/dia pra compensar dedup agressivo por source_url.
+# - 12:00 UTC (09:00 BRT) — manhã
+# - 16:00 UTC (13:00 BRT) — início tarde
+# - 20:00 UTC (17:00 BRT) — fim tarde
+# - 00:00 UTC (21:00 BRT, véspera) — noite
+#
+# Por que 4x e não 24x: cada run processa feeds que podem ter novos items.
+# Feeds brasileiros atualizam manhã/tarde/noite. 4 janelas capturam bem
+# sem desperdiçar LLM compute (Ollama local ~30-60s/artigo).
+#
+# Dedup: news-ingest tem UNIQUE index em source_url + isAlreadyInDb per-item.
+# Rodar 4x no mesmo dia NÃO gera duplicatas, só mais artigos de items novos.
 #
 # Manual: Actions > "UtilizAí: News Pipeline Cron" > Run workflow.
 #
-# Setup pré-requisito (1x):
+# Setup pré-requisito (1x, já feito em 21/04/2026):
 # 1. Neste repo (actions-engine): Settings → Secrets and variables → Actions
-#    Adicionar:
-#      UTILIZAI_CRON_SECRET = mesmo valor configurado no Vercel env var CRON_SECRET
+#    UTILIZAI_CRON_SECRET = mesmo valor do Vercel env var CRON_SECRET
 #    (Opcional) UTILIZAI_APP_URL = URL base (default: https://xn--utiliza-eza.com)
 
 name: "UtilizAí: News Pipeline Cron"
 
 on:
   schedule:
-    # 12:00 UTC diário = 09:00 BRT. Backup 1h após o cron do Vercel (11h UTC).
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * *'   # 09:00 BRT
+    - cron: '0 16 * * *'   # 13:00 BRT
+    - cron: '0 20 * * *'   # 17:00 BRT
+    - cron: '0 0 * * *'    # 21:00 BRT (UTC 00:00)
   workflow_dispatch:
     inputs:
       reason:
@@ -40,17 +50,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Sanity check — secret length
-        env:
-          CRON_SECRET: ${{ secrets.UTILIZAI_CRON_SECRET }}
-        run: |
-          set -eu
-          LEN=${#CRON_SECRET}
-          echo "Secret length: $LEN (expected 64)"
-          if [ "$LEN" != "64" ]; then
-            echo "::warning::Secret length unexpected ($LEN vs 64) — re-add UTILIZAI_CRON_SECRET"
-          fi
-
       - name: Trigger cron-master endpoint
         id: trigger
         env:
