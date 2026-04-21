@@ -1,0 +1,61 @@
+# UtilizAí — GSC Weekly Report
+# Coleta métricas do GSC e envia email. Schedule: segunda 09:30 BRT.
+
+name: "UtilizAí: GSC Weekly Report"
+
+on:
+  schedule:
+    - cron: '30 12 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: utilizai-gsc-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: GSC Report + Email
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/UtilizAi
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: scripts/gsc-report/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scripts/gsc-report/requirements.txt
+
+      - name: Run GSC report
+        working-directory: scripts/gsc-report
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GSC_SA_JSON_BASE64 }}
+          GSC_SITE_URL: sc-domain:xn--utiliza-eza.com
+          SMTP_HOST:  ${{ secrets.NL_SMTP_HOST }}
+          SMTP_PORT:  ${{ secrets.NL_SMTP_PORT }}
+          SMTP_USER:  ${{ secrets.NL_SMTP_USER }}
+          SMTP_PASS:  ${{ secrets.NL_SMTP_PASS }}
+          FROM_EMAIL: ${{ secrets.NL_FROM_EMAIL }}
+          FROM_NAME:  UtilizAí GSC Bot
+          REPORT_TO_EMAIL: renatopassos516@gmail.com
+        run: python report.py
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: utilizai-gsc-report-${{ github.run_number }}
+          path: scripts/gsc-report/reports/*.html
+          retention-days: 90
+          if-no-files-found: ignore
