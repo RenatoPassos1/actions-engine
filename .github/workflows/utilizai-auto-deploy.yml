@@ -1,0 +1,115 @@
+# UtilizAí — Auto Deploy
+# Polla o main do repo UtilizAi a cada 5 min. Se HEAD mudou desde o último
+# deploy registrado, dispara o Vercel Deploy Hook.
+#
+# Necessário porque o GitHub App do Vercel está desinstalado no repo UtilizAi
+# (zero webhooks), então o auto-deploy nativo do Vercel não dispara. Como este
+# repo (actions-engine) é público, Actions minutes são ilimitados.
+#
+# Setup pré-requisito (já feito):
+# - Secret UTILIZAI_VERCEL_DEPLOY_HOOK no actions-engine = Deploy Hook URL do Vercel
+# - Secret REPO_PAT no actions-engine = PAT com read:repo no UtilizAi (repo privado)
+
+name: "UtilizAí: Auto Deploy (poll main SHA)"
+
+on:
+  schedule:
+    # A cada 5 min. Mín Vercel Hobby = 100 builds/mês = limite é ~1 deploy a cada 7h
+    # mas só dispara quando SHA muda, então 5min de polling é seguro.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: utilizai-auto-deploy
+  cancel-in-progress: false
+
+jobs:
+  poll-and-deploy:
+    name: Poll main SHA and deploy if changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Get HEAD SHA of UtilizAi/main
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+        run: |
+          SHA=$(gh api repos/RenatoPassos1/UtilizAi/commits/main --jq '.sha')
+          if [ -z "$SHA" ]; then
+            echo "::error::Failed to fetch HEAD SHA"
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Current HEAD: $SHA"
+
+      - name: Restore last deployed SHA cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .last-deployed-sha
+          key: utilizai-last-deployed-sha
+
+      - name: Compare SHAs
+        id: compare
+        run: |
+          CURRENT="${{ steps.sha.outputs.sha }}"
+          if [ -f .last-deployed-sha ]; then
+            LAST=$(cat .last-deployed-sha)
+          else
+            LAST=""
+          fi
+          echo "Last deployed: ${LAST:-<none>}"
+          echo "Current HEAD:  $CURRENT"
+
+          if [ "$CURRENT" = "$LAST" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No change, skipping deploy"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "SHA changed, will trigger deploy"
+          fi
+
+      - name: Trigger Vercel Deploy Hook
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          DEPLOY_HOOK: ${{ secrets.UTILIZAI_VERCEL_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "::error::UTILIZAI_VERCEL_DEPLOY_HOOK secret not set"
+            exit 1
+          fi
+
+          RESPONSE=$(curl -s -X POST "$DEPLOY_HOOK")
+          echo "Response: $RESPONSE"
+
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job.id // empty')
+          if [ -z "$JOB_ID" ]; then
+            echo "::error::Deploy Hook did not return job.id"
+            exit 1
+          fi
+          echo "Deploy job created: $JOB_ID"
+
+      - name: Update last-deployed SHA file
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          echo "${{ steps.sha.outputs.sha }}" > .last-deployed-sha
+
+      - name: Save last deployed SHA cache
+        if: steps.compare.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .last-deployed-sha
+          key: utilizai-last-deployed-sha-${{ github.run_id }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## UtilizAí — Auto Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **HEAD main:** \`${{ steps.sha.outputs.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Mudou?** ${{ steps.compare.outputs.changed }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.compare.outputs.changed }}" = "true" ]; then
+            echo "- **Deploy disparado:** sim" >> $GITHUB_STEP_SUMMARY
+          fi
