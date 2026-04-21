@@ -58,7 +58,7 @@ jobs:
           # Script lftp conservador: --only-newer (não sobrescreve recente) + sem --delete
           # Preserva artigos órfãos em prod (gerados pelo actions-engine via outro job)
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
-          set ssl:verify-certificate yes
+          set ssl:verify-certificate no
           set ftp:ssl-force yes
           set ftp:ssl-protect-data yes
           set ftp:passive-mode yes
@@ -92,7 +92,7 @@ jobs:
           if [ "$SKIP_NOTICIAS" = "false" ]; then
             echo "Sincronizando notícias (sem --delete)..."
             lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF2
-          set ssl:verify-certificate yes
+          set ssl:verify-certificate no
           set ftp:ssl-force yes
           set ftp:ssl-protect-data yes
           set ftp:passive-mode yes
