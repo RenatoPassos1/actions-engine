@@ -94,17 +94,17 @@ jobs:
           FTP_HOST: ${{ secrets.VK_FTP_HOST }}
           FTP_USER: ${{ secrets.VK_FTP_USER }}
           FTP_PASS: ${{ secrets.VK_FTP_PASS }}
-        timeout-minutes: 3
+        timeout-minutes: 12
         working-directory: site-vektor-consultoria
         run: |
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ssl:verify-certificate no
           set ftp:passive-mode yes
           set net:timeout 30
-          set net:max-retries 2
+          set net:max-retries 3
           set net:reconnect-interval-base 5
           cd /public_html
-          mirror -R --only-newer --verbose public_html/noticias /public_html/noticias
+          mirror -R --only-missing --no-perms --verbose --parallel=4 public_html/noticias /public_html/noticias
           put public_html/noticias.json
           put public_html/sitemap.xml
           bye
