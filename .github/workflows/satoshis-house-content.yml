@@ -1,12 +1,12 @@
 # Satoshi's House — Generate & Deploy (centralizado)
 # Clona repo privado via PAT, gera artigos, commita e faz deploy
-# Frequência: A cada hora, 24x/dia
+# Frequência: 3x/dia (9h/15h/21h BRT) — reduzida de 24x/dia pra evitar sinais de content flood spam para Google (21/04/2026)
 
 name: "Satoshi's House: Generate & Deploy"
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 12,18,0 * * *'  # 9h/15h/21h BRT (UTC-3)
   workflow_dispatch:
     inputs:
       mode:
