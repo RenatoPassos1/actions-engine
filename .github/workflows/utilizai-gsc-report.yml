@@ -4,9 +4,10 @@
 #
 # Secrets usados (actions-engine):
 #   REPO_PAT                           — PAT pra checkout do RenatoPassos1/UtilizAi (repo privado)
-#   GSC_SA_JSON_BASE64                 — Service Account key (base64 do JSON compact)
+#   UTILIZAI_GSC_SA_JSON_BASE64        — Service Account key (base64 do JSON compact)
 #                                        conta: utilizai-gsc-report@utilizai-platform.iam.gserviceaccount.com
 #                                        permissão: siteFullUser em sc-domain:xn--utiliza-eza.com
+#                                        SEPARADO do GSC_SA_JSON_BASE64 (usado pelo Satoshi's)
 #   UTILIZAI_BREVO_API_KEY             — Brevo transactional key (primary email)
 #   UTILIZAI_BREVO_SENDER_EMAIL        — ex newsletter@utilizai.com
 #   UTILIZAI_SUPABASE_URL              — https://<ref>.supabase.co
@@ -53,8 +54,8 @@ jobs:
       - name: Run GSC report
         working-directory: scripts/gsc-report
         env:
-          # GSC auth
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GSC_SA_JSON_BASE64 }}
+          # GSC auth (secret DEDICADO do UtilizAí — separado do Satoshi's GSC_SA_JSON_BASE64)
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.UTILIZAI_GSC_SA_JSON_BASE64 }}
           GSC_SITE_URL: sc-domain:xn--utiliza-eza.com
 
           # Email primary (Brevo transactional) — report.py tenta primeiro
