@@ -1,0 +1,114 @@
+# Vektor Consultoria — Deploy Estrutural para Hostinger (FTP)
+# Deploya public_html/ do repo vektor-consultoria sem apagar artigos órfãos em prod.
+# Trigger: repository_dispatch (webhook do repo) ou workflow_dispatch (manual).
+#
+# Secrets necessários (já existem no actions-engine):
+#   REPO_PAT       — PAT com acesso ao repo privado vektor-consultoria
+#   VK_FTP_HOST    — host FTP Hostinger
+#   VK_FTP_USER    — user FTP
+#   VK_FTP_PASS    — pass FTP
+
+name: "Vektor: Deploy Estrutural"
+
+on:
+  repository_dispatch:
+    types: [vektor-consultoria-deploy]
+  workflow_dispatch:
+    inputs:
+      skip_noticias:
+        description: "Pular sync de notícias (só arquivos estáticos: htaccess, index, assets)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+concurrency:
+  group: vektor-consultoria-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy via FTP
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout vektor-consultoria
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/vektor-consultoria
+          token: ${{ secrets.REPO_PAT }}
+
+      - name: Install lftp
+        run: sudo apt-get update && sudo apt-get install -y lftp
+
+      - name: Deploy to Hostinger via FTP
+        env:
+          FTP_HOST: ${{ secrets.VK_FTP_HOST }}
+          FTP_USER: ${{ secrets.VK_FTP_USER }}
+          FTP_PASS: ${{ secrets.VK_FTP_PASS }}
+          SKIP_NOTICIAS: ${{ github.event.inputs.skip_noticias || 'true' }}
+        timeout-minutes: 8
+        run: |
+          set -e
+          echo "Skip notícias: $SKIP_NOTICIAS"
+
+          # Script lftp conservador: --only-newer (não sobrescreve recente) + sem --delete
+          # Preserva artigos órfãos em prod (gerados pelo actions-engine via outro job)
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ssl:verify-certificate no
+          set ftp:passive-mode yes
+          set net:timeout 30
+          set net:max-retries 3
+          set net:reconnect-interval-base 5
+          cd /public_html
+
+          # Sempre deployar arquivos estáticos da raiz (inclui .htaccess)
+          put -O /public_html public_html/.htaccess
+          put -O /public_html public_html/index.html
+          put -O /public_html public_html/robots.txt
+          put -O /public_html public_html/sitemap.xml
+          put -O /public_html public_html/404.html
+          put -O /public_html public_html/favicon.ico
+          put -O /public_html public_html/llms.txt
+          put -O /public_html public_html/faq.json
+          put -O /public_html public_html/servicos.json
+
+          # Sync assets e páginas principais (sem apagar órfãos)
+          mirror -R --only-newer --no-perms --verbose public_html/assets /public_html/assets
+          mirror -R --only-newer --no-perms --verbose public_html/solucoes /public_html/solucoes
+          mirror -R --only-newer --no-perms --verbose public_html/contato /public_html/contato
+          mirror -R --only-newer --no-perms --verbose public_html/parceiros /public_html/parceiros
+          mirror -R --only-newer --no-perms --verbose public_html/quem-somos /public_html/quem-somos
+          mirror -R --only-newer --no-perms --verbose public_html/faq /public_html/faq
+          mirror -R --only-newer --no-perms --verbose public_html/jogos /public_html/jogos
+
+          bye
+          EOF
+
+          if [ "$SKIP_NOTICIAS" = "false" ]; then
+            echo "Sincronizando notícias (sem --delete)..."
+            lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF2
+          set ssl:verify-certificate no
+          set ftp:passive-mode yes
+          cd /public_html
+          mirror -R --only-newer --no-perms --verbose public_html/noticias /public_html/noticias
+          put -O /public_html public_html/noticias.json
+          bye
+          EOF2
+          else
+            echo "Pulando notícias (default — evita sobrescrever noticias.json em prod)"
+          fi
+
+          echo "Deploy OK — $(date)"
+
+      - name: Verify .htaccess live
+        run: |
+          sleep 5
+          echo "=== Testando redirect chain em prod ==="
+          curl -sIL "https://www.vektorconsultoria.com/solucoes" | grep -iE "^(HTTP|location):" || true
+          echo
+          echo "=== Testando /novidades → /noticias/ ==="
+          curl -sI "https://vektorconsultoria.com/novidades" | grep -iE "^(HTTP|location):" || true
