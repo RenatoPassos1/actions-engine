@@ -40,6 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Sanity check — secret length
+        env:
+          CRON_SECRET: ${{ secrets.UTILIZAI_CRON_SECRET }}
+        run: |
+          set -eu
+          LEN=${#CRON_SECRET}
+          echo "Secret length: $LEN (expected 64)"
+          if [ "$LEN" != "64" ]; then
+            echo "::warning::Secret length unexpected ($LEN vs 64) — re-add UTILIZAI_CRON_SECRET"
+          fi
+
       - name: Trigger cron-master endpoint
         id: trigger
         env:
