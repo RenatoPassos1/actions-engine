@@ -58,7 +58,9 @@ jobs:
           # Script lftp conservador: --only-newer (não sobrescreve recente) + sem --delete
           # Preserva artigos órfãos em prod (gerados pelo actions-engine via outro job)
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
-          set ssl:verify-certificate no
+          set ssl:verify-certificate yes
+          set ftp:ssl-force yes
+          set ftp:ssl-protect-data yes
           set ftp:passive-mode yes
           set net:timeout 30
           set net:max-retries 3
@@ -83,7 +85,6 @@ jobs:
           mirror -R --only-newer --no-perms --verbose public_html/parceiros /public_html/parceiros
           mirror -R --only-newer --no-perms --verbose public_html/quem-somos /public_html/quem-somos
           mirror -R --only-newer --no-perms --verbose public_html/faq /public_html/faq
-          mirror -R --only-newer --no-perms --verbose public_html/jogos /public_html/jogos
 
           bye
           EOF
@@ -91,7 +92,9 @@ jobs:
           if [ "$SKIP_NOTICIAS" = "false" ]; then
             echo "Sincronizando notícias (sem --delete)..."
             lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF2
-          set ssl:verify-certificate no
+          set ssl:verify-certificate yes
+          set ftp:ssl-force yes
+          set ftp:ssl-protect-data yes
           set ftp:passive-mode yes
           cd /public_html
           mirror -R --only-newer --no-perms --verbose public_html/noticias /public_html/noticias
