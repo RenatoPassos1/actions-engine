@@ -1,5 +1,18 @@
 # UtilizAí — GSC Weekly Report
-# Coleta métricas do GSC e envia email. Schedule: segunda 09:30 BRT.
+# Coleta métricas do GSC, persiste snapshot em Supabase (gsc_reports) e envia
+# email. Schedule: segunda 09:30 BRT. Runs em conta free (GH Actions).
+#
+# Secrets usados (actions-engine):
+#   REPO_PAT                           — PAT pra checkout do RenatoPassos1/UtilizAi (repo privado)
+#   GSC_SA_JSON_BASE64                 — Service Account key (base64 do JSON compact)
+#                                        conta: utilizai-gsc-report@utilizai-platform.iam.gserviceaccount.com
+#                                        permissão: siteFullUser em sc-domain:xn--utiliza-eza.com
+#   UTILIZAI_BREVO_API_KEY             — Brevo transactional key (primary email)
+#   UTILIZAI_BREVO_SENDER_EMAIL        — ex newsletter@utilizai.com
+#   UTILIZAI_SUPABASE_URL              — https://<ref>.supabase.co
+#   UTILIZAI_SUPABASE_SERVICE_ROLE_KEY — service_role key (bypass RLS)
+#   NL_SMTP_HOST/PORT/USER/PASS        — SMTP fallback (se Brevo falhar)
+#   NL_FROM_EMAIL                      — From do SMTP fallback
 
 name: "UtilizAí: GSC Weekly Report"
 
@@ -40,15 +53,28 @@ jobs:
       - name: Run GSC report
         working-directory: scripts/gsc-report
         env:
+          # GSC auth
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GSC_SA_JSON_BASE64 }}
           GSC_SITE_URL: sc-domain:xn--utiliza-eza.com
+
+          # Email primary (Brevo transactional) — report.py tenta primeiro
+          BREVO_API_KEY:      ${{ secrets.UTILIZAI_BREVO_API_KEY }}
+          BREVO_SENDER_EMAIL: ${{ secrets.UTILIZAI_BREVO_SENDER_EMAIL }}
+          BREVO_SENDER_NAME:  UtilizAí GSC Bot
+
+          # Email fallback (SMTP) — só dispara se Brevo falhar
           SMTP_HOST:  ${{ secrets.NL_SMTP_HOST }}
           SMTP_PORT:  ${{ secrets.NL_SMTP_PORT }}
           SMTP_USER:  ${{ secrets.NL_SMTP_USER }}
           SMTP_PASS:  ${{ secrets.NL_SMTP_PASS }}
           FROM_EMAIL: ${{ secrets.NL_FROM_EMAIL }}
           FROM_NAME:  UtilizAí GSC Bot
+
           REPORT_TO_EMAIL: renatopassos516@gmail.com
+
+          # Persistência histórica em Supabase (tabela gsc_reports)
+          SUPABASE_URL:              ${{ secrets.UTILIZAI_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
         run: python report.py
 
       - name: Upload report artifact
