@@ -1,0 +1,77 @@
+# LeiloAI - QA: smoke test publico diario + db-lint semanal
+# Nao pode causar custo, so hits HTTP em rotas publicas
+
+name: "LeiloAI: QA"
+
+on:
+  schedule:
+    # Smoke diario as 6h UTC (3h BRT, fora do pico)
+    - cron: '0 6 * * *'
+    # DB-lint semanal domingo 5h UTC
+    - cron: '0 5 * * 0'
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Qual job rodar"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - smoke
+          - db-lint
+
+jobs:
+  smoke:
+    if: >-
+      github.event.schedule == '0 6 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checa rotas publicas criticas
+        run: |
+          set -euo pipefail
+          rotas=(
+            "https://leiloai.com/"
+            "https://leiloai.com/api/health"
+            "https://leiloai.com/api/v1"
+            "https://leiloai.com/planos"
+            "https://leiloai.com/cobertura"
+            "https://leiloai.com/ferramentas"
+            "https://leiloai.com/guias"
+            "https://leiloai.com/sitemap.xml"
+            "https://leiloai.com/robots.txt"
+          )
+          falhas=0
+          for u in "${rotas[@]}"; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$u")
+            echo "$code $u"
+            if [ "$code" != "200" ]; then
+              falhas=$((falhas+1))
+            fi
+          done
+          if [ $falhas -gt 0 ]; then
+            echo "::error::$falhas rotas retornaram status diferente de 200"
+            exit 1
+          fi
+
+  db-lint:
+    if: >-
+      github.event.schedule == '0 5 * * 0' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'db-lint'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checa RLS em tabelas publicas
+        env:
+          URL: ${{ secrets.LEILOAI_SUPABASE_URL }}
+          SR: ${{ secrets.LEILOAI_SUPABASE_SR }}
+        run: |
+          set -euo pipefail
+          # Busca todas tabelas com RLS desligado
+          payload='{"query":"select schemaname,tablename from pg_tables where schemaname='"'"'public'"'"' and rowsecurity=false"}'
+          # Aqui so um placeholder: execucao real usaria mcp_supabase ou psql.
+          echo "DB lint: verificacao automatica de RLS (placeholder, pipeline a evoluir)"

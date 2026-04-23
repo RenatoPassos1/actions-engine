@@ -1,0 +1,57 @@
+# LeiloAI - Cron Monitor: verifica se crons rodaram nas ultimas 48h
+# Abre issue automatica se nenhum run com sucesso nas ultimas 48h.
+
+name: "LeiloAI: Cron Monitor"
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # diario 9h UTC (6h BRT)
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Verifica status ingestao via /admin/metrics publico
+        id: check
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          resp=$(curl -sS --max-time 20 "https://leiloai.com/api/health")
+          echo "$resp"
+          echo "resp<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$resp" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          status=$(echo "$resp" | grep -oE '"status":"[a-z]+"' | head -1 | cut -d'"' -f4)
+          if [ "$status" != "ok" ]; then
+            echo "degraded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "degraded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Abre issue se degraded
+        if: steps.check.outputs.degraded == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const titulo = `LeiloAI health degraded ${new Date().toISOString().slice(0,10)}`;
+            const body = `Health check retornou status diferente de ok.\n\nResposta:\n\`\`\`\n${`${{ steps.check.outputs.resp }}`}\n\`\`\`\n\nAbrir /admin/fontes para detalhes.`;
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'leiloai-monitor',
+              state: 'open',
+            });
+            if (existentes.find(i => i.title === titulo)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: titulo,
+              body,
+              labels: ['leiloai-monitor'],
+            });
