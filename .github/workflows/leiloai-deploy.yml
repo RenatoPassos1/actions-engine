@@ -1,0 +1,143 @@
+# LeilôAI — Deploy Frontend (Vercel) + Workers Cloudflare
+# Clona o repo privado, build Next.js, publica na Vercel prod.
+# Em paralelo, se o push mexeu em services/**, reimplanta os Workers.
+# Trigger: repository_dispatch (webhook do repo) ou workflow_dispatch (manual).
+#
+# Secrets necessários neste repo (actions-engine):
+#   REPO_PAT                    — PAT com acesso ao leilao-watch
+#   VERCEL_TOKEN                — Vercel CLI token
+#   VERCEL_ORG_ID               — team_gdzcT5wqd4wpREVUBPN03nZX
+#   LEILOAI_VERCEL_PROJECT_ID   — prj_yz7dn0NbeLAKRgAkp09nsTD8kRi1
+#   LEILOAI_CF_TOKEN            — token Cloudflare com Workers Edit (Edit Cloudflare Workers template)
+#   LEILOAI_CF_ACCOUNT          — dbb3f03c84752fc3d9cf0e9214607e02
+
+name: "LeilôAI: Deploy"
+
+on:
+  repository_dispatch:
+    types: [leiloai-deploy]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Deploy target"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - frontend
+          - workers
+
+concurrency:
+  group: leiloai-deploy
+  cancel-in-progress: false
+
+jobs:
+  frontend:
+    if: >-
+      github.event_name == 'repository_dispatch' ||
+      github.event.inputs.target == 'all' ||
+      github.event.inputs.target == 'frontend'
+    name: Deploy Frontend (Vercel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout leilao-watch
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/leilao-watch
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: landing/apps/web/package-lock.json
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Link Vercel project
+        working-directory: landing/apps/web
+        run: |
+          mkdir -p .vercel
+          echo '{"orgId":"${{ secrets.VERCEL_ORG_ID }}","projectId":"${{ secrets.LEILOAI_VERCEL_PROJECT_ID }}"}' > .vercel/project.json
+
+      - name: Deploy to Vercel Production
+        id: vercel
+        working-directory: landing/apps/web
+        run: |
+          vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tee /tmp/deploy.log
+          DEPLOY_URL=$(grep -oP 'https://[^\s]+\.vercel\.app' /tmp/deploy.log | tail -1)
+          echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo "Deploy URL: $DEPLOY_URL"
+
+      - name: Smoke test
+        run: |
+          set -eu
+          echo "Checando leiloai.com..."
+          curl -sI https://leiloai.com | grep -i "HTTP/"
+          echo "Checando /ferramentas..."
+          curl -sI https://leiloai.com/ferramentas | grep -i "HTTP/"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI — Frontend deploy" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://leiloai.com" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deploy URL:** ${{ steps.vercel.outputs.DEPLOY_URL }}" >> $GITHUB_STEP_SUMMARY
+
+  workers:
+    if: >-
+      github.event_name == 'repository_dispatch' ||
+      github.event.inputs.target == 'all' ||
+      github.event.inputs.target == 'workers'
+    name: Deploy Workers Cloudflare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        worker:
+          - { dir: "services/ingestion/caixa",      name: "caixa" }
+          - { dir: "services/ingestion/detran",     name: "detran" }
+          - { dir: "services/ingestion/bb",         name: "bb" }
+          - { dir: "services/ingestion/receita",    name: "receita" }
+          - { dir: "services/ingestion/dou",        name: "dou" }
+          - { dir: "services/ingestion/bancos",     name: "bancos" }
+          - { dir: "services/enrichment",           name: "enrichment" }
+
+    steps:
+      - name: Checkout leilao-watch
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/leilao-watch
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Wrangler
+        run: npm install -g wrangler@latest
+
+      - name: Deploy ${{ matrix.worker.name }}
+        working-directory: landing/${{ matrix.worker.dir }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.LEILOAI_CF_ACCOUNT }}
+        run: |
+          wrangler deploy
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "- Worker \`${{ matrix.worker.name }}\` deployed" >> $GITHUB_STEP_SUMMARY

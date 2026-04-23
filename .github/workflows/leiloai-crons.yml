@@ -1,0 +1,98 @@
+# LeilôAI — Crons (fonte primária)
+#
+# Dispara workers Cloudflare que não têm cron próprio (limite Free = 5 triggers).
+# Também roda hard-delete de contas soft-deleted há mais de 30 dias (LGPD).
+#
+# Secrets necessários:
+#   LEILOAI_DISPARO_SECRET  — secret x-disparo-secret dos workers
+#   LEILOAI_SUPABASE_URL    — https://<ref>.supabase.co
+#   LEILOAI_SUPABASE_SR     — service_role key
+
+name: "LeilôAI: Crons"
+
+on:
+  schedule:
+    # bancos: 11h UTC (08h BRT)
+    - cron: '0 11 * * *'
+    # enrichment: a cada 2h
+    - cron: '0 */2 * * *'
+    # hard-delete LGPD: diário, 03h UTC (00h BRT)
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Qual cron rodar"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - bancos
+          - enrichment
+          - hard_delete
+
+concurrency:
+  group: leiloai-crons-${{ github.event.schedule || github.event.inputs.job }}
+  cancel-in-progress: false
+
+jobs:
+  bancos:
+    if: >-
+      github.event.schedule == '0 11 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'bancos'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Dispara worker bancos
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingestao-bancos.renatopassos516.workers.dev/run" \
+            | tee /tmp/resp.json | head -c 500
+          echo
+
+  enrichment:
+    if: >-
+      github.event.schedule == '0 */2 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'enrichment'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Dispara worker enrichment
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-enrichment.renatopassos516.workers.dev/run" \
+            | tee /tmp/resp.json | head -c 500
+          echo
+
+  hard_delete_lgpd:
+    if: >-
+      github.event.schedule == '0 3 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'hard_delete'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Hard-delete contas soft-deleted > 30 dias
+        env:
+          URL: ${{ secrets.LEILOAI_SUPABASE_URL }}
+          SR: ${{ secrets.LEILOAI_SUPABASE_SR }}
+        run: |
+          set -euo pipefail
+          # Busca contas soft-deleted há mais de 30 dias
+          LIMIT_DATE=$(date -u -d '30 days ago' '+%Y-%m-%dT%H:%M:%SZ')
+          echo "Procurando contas soft-deleted antes de: $LIMIT_DATE"
+          RESP=$(curl -sS -X DELETE \
+            "${URL}/rest/v1/users?deleted_at=lt.${LIMIT_DATE}&deleted_at=not.is.null" \
+            -H "apikey: ${SR}" \
+            -H "Authorization: Bearer ${SR}" \
+            -H "Prefer: return=minimal" \
+            -w "\n%{http_code}")
+          echo "Resposta: $RESP"
