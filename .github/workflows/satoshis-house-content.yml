@@ -89,16 +89,16 @@ jobs:
       # --- SCHEDULED RUNS ---
       - name: "Generate 2 news articles"
         if: github.event_name == 'schedule'
-        run: node tools/run-pipeline.mjs --news 2 --seo 0 --pillar 0
+        run: node tools/run-pipeline.mjs --news 2 --seo 0 --pillar 0 --locales pt-BR,en,es
 
       # --- MANUAL RUNS ---
       - name: "Manual: quick"
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'quick'
-        run: node tools/run-pipeline.mjs --quick
+        run: node tools/run-pipeline.mjs --quick --locales pt-BR,en,es
 
       - name: "Manual: full"
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
-        run: node tools/run-pipeline.mjs
+        run: node tools/run-pipeline.mjs --locales pt-BR,en,es
 
       - name: "Manual: custom"
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'custom'
