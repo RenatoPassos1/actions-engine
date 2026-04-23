@@ -129,3 +129,21 @@ jobs:
             --max-time 120 \
             | head -c 800
           echo
+
+  weekly_digest:
+    if: >-
+      github.event.schedule == '0 13 * * 5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Dispara Weekly Digest personalizado
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://leiloai.com/api/digest/weekly" \
+            --max-time 600 \
+            | head -c 800
+          echo
