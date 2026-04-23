@@ -48,7 +48,7 @@ jobs:
         with:
           repository: RenatoPassos1/leilao-watch
           token: ${{ secrets.REPO_PAT }}
-          ref: main
+          ref: feat/landing
           fetch-depth: 1
 
       - name: Setup Node.js
@@ -56,20 +56,20 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: landing/apps/web/package-lock.json
+          cache-dependency-path: apps/web/package-lock.json
 
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
       - name: Link Vercel project
-        working-directory: landing/apps/web
+        working-directory: apps/web
         run: |
           mkdir -p .vercel
           echo '{"orgId":"${{ secrets.VERCEL_ORG_ID }}","projectId":"${{ secrets.LEILOAI_VERCEL_PROJECT_ID }}"}' > .vercel/project.json
 
       - name: Deploy to Vercel Production
         id: vercel
-        working-directory: landing/apps/web
+        working-directory: apps/web
         run: |
           vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tee /tmp/deploy.log
           DEPLOY_URL=$(grep -oP 'https://[^\s]+\.vercel\.app' /tmp/deploy.log | tail -1)
@@ -118,7 +118,7 @@ jobs:
         with:
           repository: RenatoPassos1/leilao-watch
           token: ${{ secrets.REPO_PAT }}
-          ref: main
+          ref: feat/landing
           fetch-depth: 1
 
       - name: Setup Node.js
@@ -130,7 +130,7 @@ jobs:
         run: npm install -g wrangler@latest
 
       - name: Deploy ${{ matrix.worker.name }}
-        working-directory: landing/${{ matrix.worker.dir }}
+        working-directory: ${{ matrix.worker.dir }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.LEILOAI_CF_ACCOUNT }}
