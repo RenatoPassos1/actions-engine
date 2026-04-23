@@ -111,3 +111,21 @@ jobs:
             --max-time 300 \
             | tee /tmp/premium.json | head -c 800
           echo
+
+  welcome_series:
+    if: >-
+      github.event.schedule == '0 11 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Dispara Welcome Series (Entra no Feed + boas-vindas)
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://leiloai.com/api/email/welcome" \
+            --max-time 120 \
+            | head -c 800
+          echo
