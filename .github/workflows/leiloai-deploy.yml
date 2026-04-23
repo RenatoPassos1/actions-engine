@@ -111,6 +111,7 @@ jobs:
           - { dir: "services/ingestion/dou",        name: "dou" }
           - { dir: "services/ingestion/bancos",     name: "bancos" }
           - { dir: "services/enrichment",           name: "enrichment" }
+          - { dir: "services/rate-limit",           name: "rate-limit" }
 
     steps:
       - name: Checkout leilao-watch
