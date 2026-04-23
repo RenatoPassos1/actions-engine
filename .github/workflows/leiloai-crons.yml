@@ -72,6 +72,29 @@ jobs:
             | tee /tmp/resp.json | head -c 500
           echo
 
+  ingestao_diaria:
+    if: >-
+      github.event.schedule == '0 11 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'bancos'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [doe, djen, datajud, agregadores]
+    steps:
+      - name: Dispara worker ${{ matrix.worker }}
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingest-${{ matrix.worker }}.renatopassos516.workers.dev/run" \
+            --max-time 600 \
+            | head -c 500
+          echo
+
   hard_delete_lgpd:
     if: >-
       github.event.schedule == '0 3 * * *' ||

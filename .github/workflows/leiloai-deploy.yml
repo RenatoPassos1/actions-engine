@@ -104,14 +104,18 @@ jobs:
       fail-fast: false
       matrix:
         worker:
-          - { dir: "services/ingestion/caixa",      name: "caixa" }
-          - { dir: "services/ingestion/detran",     name: "detran" }
-          - { dir: "services/ingestion/bb",         name: "bb" }
-          - { dir: "services/ingestion/receita",    name: "receita" }
-          - { dir: "services/ingestion/dou",        name: "dou" }
-          - { dir: "services/ingestion/bancos",     name: "bancos" }
-          - { dir: "services/enrichment",           name: "enrichment" }
-          - { dir: "services/rate-limit",           name: "rate-limit" }
+          - { dir: "services/ingestion/caixa",       name: "caixa" }
+          - { dir: "services/ingestion/detran",      name: "detran" }
+          - { dir: "services/ingestion/bb",          name: "bb" }
+          - { dir: "services/ingestion/receita",     name: "receita" }
+          - { dir: "services/ingestion/dou",         name: "dou" }
+          - { dir: "services/ingestion/doe",         name: "doe" }
+          - { dir: "services/ingestion/djen",        name: "djen" }
+          - { dir: "services/ingestion/datajud",     name: "datajud" }
+          - { dir: "services/ingestion/bancos",      name: "bancos" }
+          - { dir: "services/ingestion/agregadores", name: "agregadores" }
+          - { dir: "services/enrichment",            name: "enrichment" }
+          - { dir: "services/rate-limit",            name: "rate-limit" }
 
     steps:
       - name: Checkout leilao-watch
