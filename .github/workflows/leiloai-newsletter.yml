@@ -1,0 +1,91 @@
+# LeilôAI — Newsletter Radar Semanal (grátis) + Alerta Diário Pro
+#
+# O Radar Semanal sai toda sexta 13h UTC (10h BRT).
+# O Alerta Pro sai 2x/dia: 11h UTC (08h BRT) e 20h UTC (17h BRT).
+#
+# Cada run chama um endpoint HTTP do site que busca itens novos da semana/dia
+# na Supabase e envia em lote via Brevo para a lista certa.
+# O endpoint requer o Bearer CRON_SECRET.
+
+name: "LeilôAI: Newsletter"
+
+on:
+  schedule:
+    # Radar Semanal: sexta 13h UTC
+    - cron: '0 13 * * 5'
+    # Alerta Pro: 11h UTC e 20h UTC todo dia
+    - cron: '0 11 * * *'
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      trilha:
+        description: "Qual trilha enviar"
+        required: true
+        default: "radar"
+        type: choice
+        options:
+          - radar
+          - pro_manha
+          - pro_tarde
+
+concurrency:
+  group: leiloai-newsletter-${{ github.event.schedule || github.event.inputs.trilha }}
+  cancel-in-progress: false
+
+jobs:
+  radar-semanal:
+    if: >-
+      github.event.schedule == '0 13 * * 5' ||
+      github.event.inputs.trilha == 'radar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara newsletter Radar
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://leiloai.com/api/newsletter/radar" \
+            --max-time 300 \
+            | tee /tmp/radar.json | head -c 800
+          echo
+
+  alerta-pro-manha:
+    if: >-
+      github.event.schedule == '0 11 * * *' ||
+      github.event.inputs.trilha == 'pro_manha'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara Alerta Pro manhã
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://leiloai.com/api/newsletter/pro?periodo=manha" \
+            --max-time 300 \
+            | tee /tmp/pro.json | head -c 800
+          echo
+
+  alerta-pro-tarde:
+    if: >-
+      github.event.schedule == '0 20 * * *' ||
+      github.event.inputs.trilha == 'pro_tarde'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara Alerta Pro tarde
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://leiloai.com/api/newsletter/pro?periodo=tarde" \
+            --max-time 300 \
+            | tee /tmp/pro.json | head -c 800
+          echo
