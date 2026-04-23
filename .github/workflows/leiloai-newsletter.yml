@@ -16,6 +16,8 @@ on:
     # Alerta Pro: 11h UTC e 20h UTC todo dia
     - cron: '0 11 * * *'
     - cron: '0 20 * * *'
+    # Alerta Premium (watchers pro+): a cada 30 min
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       trilha:
@@ -27,6 +29,7 @@ on:
           - radar
           - pro_manha
           - pro_tarde
+          - premium
 
 concurrency:
   group: leiloai-newsletter-${{ github.event.schedule || github.event.inputs.trilha }}
@@ -88,4 +91,23 @@ jobs:
             "https://leiloai.com/api/newsletter/pro?periodo=tarde" \
             --max-time 300 \
             | tee /tmp/pro.json | head -c 800
+          echo
+
+  alerta-premium:
+    if: >-
+      github.event.schedule == '*/30 * * * *' ||
+      github.event.inputs.trilha == 'premium'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Dispara Alerta Premium (watchers Pro+)
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://leiloai.com/api/newsletter/premium" \
+            --max-time 300 \
+            | tee /tmp/premium.json | head -c 800
           echo
