@@ -156,7 +156,7 @@ jobs:
               for (const body of respJSON) {
                 const lista = extrairLista(body);
                 if (Array.isArray(lista) && lista.length && detectarImovel(lista[0])) {
-                  items = lista.slice(0, 150).map(r => normalizar(r, fonte));
+                  items = lista.slice(0, 500).map(r => normalizar(r, fonte));
                   break;
                 }
               }
@@ -164,11 +164,11 @@ jobs:
               // 3b) fallback DOM - cards com href de imovel/lote
               if (!items.length) {
                 items = await page.$$eval(
-                  "a[href*='/imovel'], a[href*='/lote'], a[href*='/leilao/'], a[href*='/imoveis/'], a[href*='/veiculos/'], .card a[href], .card-imovel a, .item-imovel a, .card-lote a, [data-imovel-id] a, [data-lote-id] a, article a",
+                  "a[href*='/imovel'], a[href*='/lote'], a[href*='/leilao/'], a[href*='/imoveis/'], a[href*='/veiculos/'], a[href*='/ficha/'], a[href*='/detalhe'], a[href*='/bem/'], .card a[href], .card-imovel a, .item-imovel a, .card-lote a, [data-imovel-id] a, [data-lote-id] a, article a, .lote a, .bem-card a",
                   (els) => {
                     const out = [];
                     const vistos = new Set();
-                    for (const el of els.slice(0, 300)) {
+                    for (const el of els.slice(0, 800)) {
                       const href = el.getAttribute("href") || "";
                       if (!href || href === "#" || href.startsWith("javascript:")) continue;
                       if (vistos.has(href)) continue;
@@ -189,11 +189,38 @@ jobs:
                         lance_minimo: preco,
                         url: href,
                       });
-                      if (out.length >= 120) break;
+                      if (out.length >= 400) break;
                     }
                     return out;
                   },
                 );
+              }
+
+              // 3c) scroll extra mais agressivo se pouco items (lazy load)
+              if (items.length < 10 && items.length > 0) {
+                for (let s = 0; s < 8; s++) {
+                  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                  await page.waitForTimeout(600);
+                }
+                // retenta DOM
+                const extras = await page.$$eval(
+                  "a[href*='/imovel'], a[href*='/lote'], a[href*='/leilao/'], a[href*='/imoveis/'], a[href*='/veiculos/'], a[href*='/ficha/'], a[href*='/bem/'], article a",
+                  (els) => {
+                    const out = [];
+                    const vistos = new Set();
+                    for (const el of els.slice(0, 800)) {
+                      const href = el.getAttribute("href") || "";
+                      if (!href || href === "#" || href.startsWith("javascript:")) continue;
+                      if (vistos.has(href)) continue;
+                      vistos.add(href);
+                      out.push({ id: href.replace(/\W+/g, "-").slice(-40), titulo: (el.textContent||"").trim().slice(0,200), url: href });
+                      if (out.length >= 400) break;
+                    }
+                    return out;
+                  },
+                ).catch(() => []);
+                const existentes = new Set(items.map(i => i.url));
+                for (const e of extras) if (!existentes.has(e.url)) items.push(e);
               }
 
             } catch (e) {
@@ -211,7 +238,7 @@ jobs:
                 const r = await fetch(`${AGG}/ingest`, {
                   method: "POST",
                   headers: { "x-disparo-secret": DISPARO, "content-type": "application/json" },
-                  body: JSON.stringify({ source_id: fonte.id, items: items.slice(0, 150) }),
+                  body: JSON.stringify({ source_id: fonte.id, items: items.slice(0, 500) }),
                 });
                 if (r.ok) {
                   const j = await r.json();
