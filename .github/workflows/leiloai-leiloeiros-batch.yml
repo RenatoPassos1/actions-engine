@@ -96,7 +96,9 @@ jobs:
           }
 
           // 1) Busca leiloeiros priorizando os que ja rodaram ha mais tempo
-          const filtroFonte = FONTE_ID ? `&metadata->>fonte_id=eq.${FONTE_ID}` : "";
+          // Suporte a fonte_id dummy "all-*" para concorrencia (grupo diferente sem filtrar por fonte real)
+          const fonteIdReal = FONTE_ID && !FONTE_ID.startsWith("all-") ? FONTE_ID : "";
+          const filtroFonte = fonteIdReal ? `&metadata->>fonte_id=eq.${fonteIdReal}` : "";
           const filtroTempo = FORCAR ? "" : `&or=(last_run_at.is.null,last_run_at.lt.${encodeURIComponent(new Date(Date.now() - 12*3600*1000).toISOString())})`;
           // Inclui todos os prefixos de sources que precisam Playwright:
           // leiloeiro-* (645+ leiloeiros Nucleo e por UF),
