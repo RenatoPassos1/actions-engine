@@ -1,0 +1,86 @@
+# LeiloAI - DB Lint: roda `supabase db lint --schema public` quando migrations mudam.
+# Falha o build se aparecer warning sobre RLS ausente (politica de seguranca).
+#
+# Secrets necessarios:
+#   SUPABASE_ACCESS_TOKEN  - token pessoal do Supabase
+#   LEILOAI_SUPABASE_PROJECT_REF  - project ref (ex: abcd1234efgh)
+
+name: "LeiloAI: DB Lint"
+
+on:
+  push:
+    paths:
+      - 'landing/supabase/migrations/**'
+      - 'supabase/migrations/**'
+  pull_request:
+    paths:
+      - 'landing/supabase/migrations/**'
+      - 'supabase/migrations/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leiloai-db-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Detecta diretorio supabase
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -d "landing/supabase" ]; then
+            echo "dir=landing/supabase" >> "$GITHUB_OUTPUT"
+          elif [ -d "supabase" ]; then
+            echo "dir=supabase" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nenhum diretorio supabase/ encontrado, abortando."
+            exit 1
+          fi
+
+      - name: Link projeto Supabase
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.LEILOAI_SUPABASE_PROJECT_REF }}
+        working-directory: ${{ steps.detect.outputs.dir }}/..
+        run: |
+          set -euo pipefail
+          if [ -z "${PROJECT_REF}" ]; then
+            echo "LEILOAI_SUPABASE_PROJECT_REF nao configurado, rodando lint local."
+            exit 0
+          fi
+          supabase link --project-ref "${PROJECT_REF}"
+
+      - name: Roda supabase db lint
+        id: lint
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        working-directory: ${{ steps.detect.outputs.dir }}/..
+        run: |
+          set -euo pipefail
+          # Captura saida pra grep posterior
+          supabase db lint --schema public 2>&1 | tee /tmp/lint.txt
+          # Falha se RLS ausente aparecer (case-insensitive)
+          if grep -qiE 'rls.*(disabled|missing|ausente|not enabled|policy.*missing)' /tmp/lint.txt; then
+            echo "Lint detectou RLS ausente; bloqueando build."
+            exit 1
+          fi
+          # Tambem falha em warnings de policy_exists_rls_disabled (linter padrao Supabase)
+          if grep -qiE 'policy_exists_rls_disabled|rls_disabled_in_public' /tmp/lint.txt; then
+            echo "Lint detectou policy com RLS desabilitada; bloqueando build."
+            exit 1
+          fi
+          echo "Lint OK (sem alertas de RLS)."

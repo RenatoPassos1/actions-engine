@@ -1,0 +1,36 @@
+# LeilôAI — Reconciliação diária do grupo Telegram (arch §12.3)
+#
+# Cron diário (6h UTC = 3h BRT) que verifica todos os usuários com
+# telegram_id setado e remove do grupo aqueles que não têm subscription
+# ativa em plano Investidor ou superior. Limpa users.telegram_id após kick.
+#
+# Auth via header x-cron-secret = LEILOAI_CRON_SECRET.
+
+name: "LeilôAI: Telegram Reconciliação"
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-telegram-reconciliar
+  cancel-in-progress: false
+
+jobs:
+  reconciliar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Reconcilia membros do grupo Telegram
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "https://leiloai.com/api/telegram/reconciliar" \
+            --max-time 300 \
+            | tee /tmp/telegram-reconciliar.json | head -c 800
+          echo
