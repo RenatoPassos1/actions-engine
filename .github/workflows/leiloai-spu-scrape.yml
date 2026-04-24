@@ -1,0 +1,214 @@
+# LeilôAI — SPU scrape via Playwright
+#
+# O portal oficial da SPU (imoveis.economia.gov.br/leiloes) é Angular SPA
+# puro: a listagem de imóveis aparece SÓ depois do JS rodar e fazer fetch
+# das APIs internas. Cloudflare Worker não consegue executar JS de página
+# (sem DOM, sem Playwright). Resolução: GitHub Actions roda Playwright
+# headless, navega para o portal, espera as listagens carregarem, extrai
+# os imóveis via DOM e POSTa para o worker `leiloai-ingestao-receita`
+# que faz upsert em items.
+#
+# Cron: 1x/dia às 04h UTC (01h BRT). Roda em ~3-5 min, ~free tier.
+#
+# Secrets necessários:
+#   LEILOAI_DISPARO_SECRET — mesmo dos demais workers leiloai
+#   LEILOAI_RECEITA_URL    — opcional, default workers.dev
+
+name: "LeilôAI: SPU Scrape (Playwright)"
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      max_cidades:
+        description: "Quantas cidades varrer (default 27)"
+        required: false
+        default: "27"
+        type: string
+
+concurrency:
+  group: leiloai-spu-scrape
+  cancel-in-progress: false
+
+env:
+  RECEITA_URL: ${{ secrets.LEILOAI_RECEITA_URL || 'https://leiloai-ingestao-receita.renatopassos516.workers.dev' }}
+
+jobs:
+  scrape:
+    name: Playwright scrape SPU
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright + chromium
+        run: |
+          npm install -g playwright@1
+          npx -y playwright install chromium --with-deps
+
+      - name: Scrape SPU portal
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+          MAX_CIDADES: ${{ github.event.inputs.max_cidades || '27' }}
+        run: |
+          mkdir -p /tmp/spu
+          cat > /tmp/spu/scrape.mjs <<'EOF'
+          import { chromium } from "playwright";
+
+          const RECEITA = process.env.RECEITA_URL;
+          const DISPARO = process.env.DISPARO;
+          if (!DISPARO) throw new Error("LEILOAI_DISPARO_SECRET ausente");
+
+          const browser = await chromium.launch({ headless: true });
+          const ctx = await browser.newContext({
+            userAgent:
+              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 LeiloAI-Crawler/1.0",
+            locale: "pt-BR",
+            viewport: { width: 1366, height: 900 },
+          });
+          const page = await ctx.newPage();
+
+          const dadosAPI = [];
+          // Intercepta respostas JSON da API interna do portal
+          page.on("response", async (resp) => {
+            const url = resp.url();
+            if (!/imoveis|edital|public/.test(url)) return;
+            const ct = resp.headers()["content-type"] ?? "";
+            if (!ct.includes("json")) return;
+            try {
+              const body = await resp.json();
+              dadosAPI.push({ url, body });
+            } catch {}
+          });
+
+          console.log("Abrindo portal SPU…");
+          await page.goto("https://imoveis.economia.gov.br/leiloes", {
+            waitUntil: "networkidle",
+            timeout: 60_000,
+          });
+
+          // Espera os cards carregarem (Angular vai injetar)
+          console.log("Aguardando cards…");
+          try {
+            await page.waitForSelector(
+              "app-card-imovel, .card-imovel, .item-imovel, .imovel-card, [data-imovel-id]",
+              { timeout: 30_000 },
+            );
+          } catch {
+            console.warn("Selector nao encontrado em 30s, tentando extrair mesmo assim");
+          }
+
+          // Tenta scrollar pra carregar lazy-load
+          for (let i = 0; i < 8; i++) {
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await page.waitForTimeout(800);
+          }
+
+          // Extrai via DOM
+          const itemsDOM = await page.evaluate(() => {
+            const out = [];
+            const candidates = document.querySelectorAll(
+              "app-card-imovel, .card-imovel, .item-imovel, .imovel-card, [data-imovel-id], a[href*='/imovel']",
+            );
+            for (const el of candidates) {
+              const link = el.tagName === "A" ? el : el.querySelector("a[href*='/imovel']");
+              const href = link?.getAttribute("href") ?? null;
+              if (!href) continue;
+              const idMatch = href.match(/[?&]id=(\d+)|\/(\d+)\/?$|\/imovel\/(\d+)/);
+              const id = idMatch?.[1] ?? idMatch?.[2] ?? idMatch?.[3] ?? null;
+              if (!id) continue;
+              const titulo =
+                el.querySelector("h2, h3, .titulo, .nome")?.textContent?.trim() ?? "Imóvel SPU";
+              const cidade =
+                el.querySelector(".cidade, .municipio, .local")?.textContent?.trim() ?? null;
+              const uf = el.querySelector(".uf, .estado")?.textContent?.trim()?.slice(0, 2) ?? null;
+              const valor =
+                el.querySelector(".valor, .preco, .lance")?.textContent?.trim() ?? null;
+              out.push({ id, titulo, cidade, uf, lance_minimo: valor, url: href });
+            }
+            return out;
+          });
+
+          console.log(`Cards via DOM: ${itemsDOM.length}`);
+
+          // Combina DOM + dados de respostas API interceptadas
+          const itemsAPI = [];
+          for (const { body } of dadosAPI) {
+            const lista = Array.isArray(body)
+              ? body
+              : body?.data ?? body?.content ?? body?.items ?? body?.imoveis ?? [];
+            if (!Array.isArray(lista)) continue;
+            for (const raw of lista) {
+              if (!raw || typeof raw !== "object") continue;
+              const id = String(
+                raw.id ?? raw.idImovel ?? raw.codigo ?? raw.numero ?? "",
+              );
+              if (!id) continue;
+              itemsAPI.push({
+                id,
+                titulo: raw.titulo ?? raw.nome ?? raw.descricao ?? "Imóvel SPU",
+                descricao: raw.descricao ?? null,
+                uf: raw.uf ?? raw.siglaUf ?? raw.estado ?? null,
+                cidade: raw.cidade ?? raw.municipio ?? raw.nomeMunicipio ?? null,
+                endereco: raw.endereco ?? raw.logradouro ?? null,
+                area_total: raw.areaTotal ?? raw.area ?? raw.areaConstruida ?? null,
+                lance_minimo:
+                  raw.valorMinimo ?? raw.lanceMinimo ?? raw.preco ?? raw.valor ?? null,
+                avaliacao: raw.avaliacao ?? raw.valorAvaliacao ?? null,
+                edital_pdf_url: raw.editalUrl ?? raw.urlEdital ?? null,
+                url: `/imovel/${id}`,
+              });
+            }
+          }
+          console.log(`Items via API interceptada: ${itemsAPI.length}`);
+
+          // Merge: prioriza API se mesmo id existe nos dois
+          const map = new Map();
+          for (const it of itemsDOM) map.set(it.id, it);
+          for (const it of itemsAPI) map.set(it.id, { ...map.get(it.id), ...it });
+          const items = Array.from(map.values());
+          console.log(`Total items unicos: ${items.length}`);
+
+          await browser.close();
+
+          if (!items.length) {
+            console.log("Nada coletado, encerrando sem POST");
+            process.exit(0);
+          }
+
+          // POST em chunks de 200 para o worker receita
+          const CHUNK = 200;
+          let inseridos = 0;
+          for (let i = 0; i < items.length; i += CHUNK) {
+            const slice = items.slice(i, i + CHUNK);
+            const resp = await fetch(`${RECEITA}/ingest-spu`, {
+              method: "POST",
+              headers: {
+                "x-disparo-secret": DISPARO,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({ items: slice }),
+            });
+            const txt = await resp.text();
+            console.log(`POST chunk ${i}/${items.length}: HTTP ${resp.status} - ${txt.slice(0, 200)}`);
+            if (resp.ok) {
+              try {
+                const json = JSON.parse(txt);
+                inseridos += json.inseridos ?? 0;
+              } catch {}
+            }
+          }
+          console.log(`SPU scrape ok: ${items.length} items, ${inseridos} inseridos`);
+          EOF
+          node --experimental-vm-modules /tmp/spu/scrape.mjs
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI — SPU Playwright scrape" >> $GITHUB_STEP_SUMMARY
+          echo "- Data: $(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- Worker: \`${RECEITA_URL}\`" >> $GITHUB_STEP_SUMMARY
