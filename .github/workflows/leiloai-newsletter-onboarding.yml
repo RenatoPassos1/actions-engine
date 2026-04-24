@@ -1,0 +1,36 @@
+# LeilôAI — Trilha "Entra no Feed" (arch §14)
+#
+# Cron diário (12h UTC = 9h BRT) que processa a tabela
+# email_onboarding_sequence: pega até 50 linhas com scheduled_at <= now()
+# e sent_at IS NULL, envia via Brevo e marca sent_at = now().
+#
+# Auth via header x-cron-secret = LEILOAI_CRON_SECRET.
+
+name: "LeilôAI: Newsletter Onboarding (Entra no Feed)"
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-newsletter-onboarding
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara trilha Entra no Feed
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "https://leiloai.com/api/newsletter/onboarding/dispatch" \
+            --max-time 300 \
+            | tee /tmp/onboarding.json | head -c 800
+          echo

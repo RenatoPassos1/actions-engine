@@ -1,57 +1,118 @@
-# LeiloAI - Cron Monitor: verifica se crons rodaram nas ultimas 48h
-# Abre issue automatica se nenhum run com sucesso nas ultimas 48h.
+# LeiloAI - Cron Monitor: pinga health dos 18 workers Cloudflare a cada 15 min.
+# Abre GitHub issue (label "incident") se algum worker retornar 5xx ou timeout.
+# Nunca derruba CI: failure de worker so abre issue, job sai sucesso.
 
 name: "LeiloAI: Cron Monitor"
 
 on:
   schedule:
-    - cron: '0 9 * * *' # diario 9h UTC (6h BRT)
+    - cron: '*/15 * * * *' # a cada 15 minutos
   workflow_dispatch:
 
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: leiloai-cron-monitor
+  cancel-in-progress: false
+
 jobs:
-  monitor:
+  health_check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        worker:
+          - { slug: ingest-bb,             url: 'https://leiloai-ingest-bb.renatopassos516.workers.dev' }
+          - { slug: ingest-caixa,          url: 'https://leiloai-ingest-caixa.renatopassos516.workers.dev' }
+          - { slug: ingest-agregadores,    url: 'https://leiloai-ingest-agregadores.renatopassos516.workers.dev' }
+          - { slug: ingest-datajud,        url: 'https://leiloai-ingest-datajud.renatopassos516.workers.dev' }
+          - { slug: ingest-detran,         url: 'https://leiloai-ingest-detran.renatopassos516.workers.dev' }
+          - { slug: ingest-djen,           url: 'https://leiloai-ingest-djen.renatopassos516.workers.dev' }
+          - { slug: ingest-doe,            url: 'https://leiloai-ingest-doe.renatopassos516.workers.dev' }
+          - { slug: ingest-dou,            url: 'https://leiloai-ingest-dou.renatopassos516.workers.dev' }
+          - { slug: ingest-marketplaces,   url: 'https://leiloai-ingestao-marketplaces.renatopassos516.workers.dev' }
+          - { slug: ingest-querido-diario, url: 'https://leiloai-ingest-querido-diario.renatopassos516.workers.dev' }
+          - { slug: ingest-receita,        url: 'https://leiloai-ingestao-receita.renatopassos516.workers.dev' }
+          - { slug: ingest-rental,         url: 'https://leiloai-ingestao-rental.renatopassos516.workers.dev' }
+          - { slug: ingest-seuimovelbb,    url: 'https://leiloai-ingest-seuimovelbb.renatopassos516.workers.dev' }
+          - { slug: ingest-spyleiloes,     url: 'https://leiloai-ingest-spyleiloes.renatopassos516.workers.dev' }
+          - { slug: ingest-bancos,         url: 'https://leiloai-ingestao-bancos.renatopassos516.workers.dev' }
+          - { slug: enrichment,            url: 'https://leiloai-enrichment.renatopassos516.workers.dev' }
+          - { slug: enrichment-ia,         url: 'https://leiloai-enrichment-ia.renatopassos516.workers.dev' }
+          - { slug: orchestrator,          url: 'https://leiloai-orchestrator.renatopassos516.workers.dev' }
     steps:
-      - name: Verifica status ingestao via /admin/metrics publico
-        id: check
-        env:
-          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+      - name: Pinga ${{ matrix.worker.slug }}
+        id: ping
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          resp=$(curl -sS --max-time 20 "https://leiloai.com/api/health")
-          echo "$resp"
-          echo "resp<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$resp" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          status=$(echo "$resp" | grep -oE '"status":"[a-z]+"' | head -1 | cut -d'"' -f4)
-          if [ "$status" != "ok" ]; then
-            echo "degraded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "degraded=false" >> "$GITHUB_OUTPUT"
+          set +e
+          # /health quando existir; fallback para / na raiz
+          CODE=$(curl -sS --max-time 15 -o /tmp/body.txt -w '%{http_code}' \
+            "${{ matrix.worker.url }}/health" || echo "000")
+          if [ "$CODE" = "404" ]; then
+            CODE=$(curl -sS --max-time 15 -o /tmp/body.txt -w '%{http_code}' \
+              "${{ matrix.worker.url }}/" || echo "000")
           fi
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          BODY=$(head -c 400 /tmp/body.txt 2>/dev/null || echo "")
+          {
+            echo "body<<EOF"
+            echo "$BODY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "[$CODE] ${{ matrix.worker.url }}"
+          # 000 = curl falhou (timeout/DNS), 5xx = erro do worker
+          if [ "$CODE" = "000" ] || { [ "$CODE" -ge 500 ] 2>/dev/null && [ "$CODE" -lt 600 ] 2>/dev/null; }; then
+            echo "incident=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "incident=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Sempre exit 0 para nao derrubar CI
+          exit 0
 
-      - name: Abre issue se degraded
-        if: steps.check.outputs.degraded == 'true'
+      - name: Abre issue se incidente em ${{ matrix.worker.slug }}
+        if: steps.ping.outputs.incident == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const titulo = `LeiloAI health degraded ${new Date().toISOString().slice(0,10)}`;
-            const body = `Health check retornou status diferente de ok.\n\nResposta:\n\`\`\`\n${`${{ steps.check.outputs.resp }}`}\n\`\`\`\n\nAbrir /admin/fontes para detalhes.`;
+            const dia = new Date().toISOString().slice(0, 10);
+            const slug = '${{ matrix.worker.slug }}';
+            const url = '${{ matrix.worker.url }}';
+            const code = '${{ steps.ping.outputs.code }}';
+            const body = `${{ steps.ping.outputs.body }}`;
+            const titulo = `[incident] worker ${slug} indisponivel ${dia}`;
+            const corpo = [
+              `Worker: \`${slug}\``,
+              `URL: ${url}/health`,
+              `Status: ${code}`,
+              ``,
+              `Resposta:`,
+              `\`\`\``,
+              body || '(vazio)',
+              `\`\`\``,
+              ``,
+              `Detectado em: ${new Date().toISOString()}`,
+              `Workflow: cron-monitor matrix`,
+            ].join('\n');
             const { data: existentes } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              labels: 'leiloai-monitor',
+              labels: 'incident',
               state: 'open',
+              per_page: 100,
             });
-            if (existentes.find(i => i.title === titulo)) return;
+            // Dedup: 1 issue por worker por dia
+            if (existentes.find(i => i.title === titulo)) {
+              console.log('Issue ja existe para hoje, ignorando.');
+              return;
+            }
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: titulo,
-              body,
-              labels: ['leiloai-monitor'],
+              body: corpo,
+              labels: ['incident', 'leiloai-monitor'],
             });

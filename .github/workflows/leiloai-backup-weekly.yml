@@ -1,0 +1,149 @@
+# LeiloAI - Backup Weekly: pg_dump completo do Postgres Supabase
+# subido para Cloudflare R2 (S3 compativel) toda madrugada de domingo.
+#
+# Falha no upload ou no dump NAO derruba CI. Em caso de erro, abre issue com label "incident".
+#
+# Secrets necessarios:
+#   LEILOAI_SUPABASE_DB_URL   - postgres://... (Pooler ou direct, com password)
+#   CF_R2_ACCESS_KEY_ID
+#   CF_R2_SECRET_ACCESS_KEY
+#   CF_R2_ACCOUNT_ID
+#   CF_R2_BUCKET              - nome do bucket R2 (ex: leiloai-backups)
+
+name: "LeiloAI: Backup Weekly"
+
+on:
+  schedule:
+    - cron: '0 4 * * 0' # domingo 04h UTC (01h BRT)
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: leiloai-backup-weekly
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instala postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Roda pg_dump
+        id: dump
+        continue-on-error: true
+        env:
+          SUPABASE_DB_URL: ${{ secrets.LEILOAI_SUPABASE_DB_URL }}
+        run: |
+          set -e
+          if [ -z "${SUPABASE_DB_URL:-}" ]; then
+            echo "LEILOAI_SUPABASE_DB_URL nao configurado."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=secret ausente" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NOW=$(date -u +%Y%m%d_%H%M%S)
+          DEST="backup_${NOW}.sql.gz"
+          if pg_dump --no-owner --no-acl "$SUPABASE_DB_URL" | gzip > "$DEST"; then
+            SZ=$(stat -c '%s' "$DEST")
+            echo "Backup salvo: $DEST ($SZ bytes)"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "arquivo=$DEST" >> "$GITHUB_OUTPUT"
+            echo "tamanho=$SZ" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=pg_dump falhou" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Configura aws CLI para R2
+        if: steps.dump.outputs.ok == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -e
+          mkdir -p ~/.aws
+          cat > ~/.aws/config <<EOF
+          [default]
+          region = auto
+          output = json
+          EOF
+          cat > ~/.aws/credentials <<EOF
+          [default]
+          aws_access_key_id = ${AWS_ACCESS_KEY_ID}
+          aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
+          EOF
+
+      - name: Upload para R2
+        id: upload
+        if: steps.dump.outputs.ok == 'true'
+        continue-on-error: true
+        env:
+          CF_R2_ACCOUNT_ID: ${{ secrets.CF_R2_ACCOUNT_ID }}
+          CF_R2_BUCKET: ${{ secrets.CF_R2_BUCKET }}
+          ARQUIVO: ${{ steps.dump.outputs.arquivo }}
+        run: |
+          set -e
+          if [ -z "${CF_R2_ACCOUNT_ID:-}" ] || [ -z "${CF_R2_BUCKET:-}" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=R2 secrets ausentes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ENDPOINT="https://${CF_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          if aws s3 cp "$ARQUIVO" "s3://${CF_R2_BUCKET}/postgres/${ARQUIVO}" \
+               --endpoint-url "$ENDPOINT"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=upload R2 falhou" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Abre issue se falhou
+        if: steps.dump.outputs.ok != 'true' || steps.upload.outputs.ok != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dia = new Date().toISOString().slice(0, 10);
+            const dumpOk = '${{ steps.dump.outputs.ok }}' === 'true';
+            const uploadOk = '${{ steps.upload.outputs.ok }}' === 'true';
+            const erroDump = '${{ steps.dump.outputs.erro }}';
+            const erroUpload = '${{ steps.upload.outputs.erro }}';
+            const titulo = `[incident] backup-weekly falhou ${dia}`;
+            const corpo = [
+              `Backup semanal nao concluiu.`,
+              ``,
+              `- pg_dump: ${dumpOk ? 'OK' : 'FALHOU (' + erroDump + ')'}`,
+              `- upload R2: ${uploadOk ? 'OK' : 'FALHOU (' + erroUpload + ')'}`,
+              ``,
+              `Detectado em: ${new Date().toISOString()}`,
+              `Workflow: leiloai-backup-weekly`,
+            ].join('\n');
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'incident',
+              state: 'open',
+              per_page: 100,
+            });
+            if (existentes.find(i => i.title === titulo)) {
+              console.log('Issue ja existe para hoje, ignorando.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: titulo,
+              body: corpo,
+              labels: ['incident', 'leiloai-monitor'],
+            });

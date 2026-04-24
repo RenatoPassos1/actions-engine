@@ -1,0 +1,36 @@
+# LeilôAI — Weekly Digest automatizado (arch §22.3)
+#
+# Cron semanal (segunda 12h UTC = 9h BRT) que dispara o envio do
+# Radar Semanal personalizado (top 5 itens com Nota >= 70) para todos
+# os usuários com plan != 'free' E notification_prefs.newsletter_radar = true.
+#
+# Auth via header x-cron-secret = LEILOAI_CRON_SECRET.
+
+name: "LeilôAI: Newsletter Weekly Digest"
+
+on:
+  schedule:
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-newsletter-weekly
+  cancel-in-progress: false
+
+jobs:
+  weekly-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Dispara Weekly Digest (top 5 da semana)
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "https://leiloai.com/api/newsletter/weekly-digest?dispatch=1" \
+            --max-time 600 \
+            | tee /tmp/weekly.json | head -c 800
+          echo
