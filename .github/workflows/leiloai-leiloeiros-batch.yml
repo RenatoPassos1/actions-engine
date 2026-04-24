@@ -40,7 +40,9 @@ on:
         type: boolean
 
 concurrency:
-  group: leiloai-leiloeiros-batch
+  # Um grupo por fonte_id permite paralelismo (diferentes fontes em paralelo).
+  # Cancelamento diferente por shard.
+  group: leiloai-leiloeiros-batch-${{ github.event.inputs.fonte_id || 'all' }}
   cancel-in-progress: false
 
 env:
@@ -48,7 +50,7 @@ env:
 
 jobs:
   scrape:
-    name: Playwright batch 100 leiloeiros
+    name: Playwright batch leiloeiros (fonte=${{ github.event.inputs.fonte_id || 'all' }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
