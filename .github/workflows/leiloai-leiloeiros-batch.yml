@@ -98,11 +98,16 @@ jobs:
           // 1) Busca leiloeiros priorizando os que ja rodaram ha mais tempo
           const filtroFonte = FONTE_ID ? `&metadata->>fonte_id=eq.${FONTE_ID}` : "";
           const filtroTempo = FORCAR ? "" : `&or=(last_run_at.is.null,last_run_at.lt.${encodeURIComponent(new Date(Date.now() - 12*3600*1000).toISOString())})`;
-          // Inclui leiloeiro-nucleo-* E agg-* (agregadores nacionais SPA que
-          // tambem precisam Playwright: Sodre, Mega, Zuk, Frazao, Hasta, etc)
+          // Inclui todos os prefixos de sources que precisam Playwright:
+          // leiloeiro-* (645+ leiloeiros Nucleo e por UF),
+          // agg-* (agregadores nacionais SPA),
+          // bank-* (bancos com leiloes SPA),
+          // plat-* (plataformas especializadas),
+          // gov-* (portais governamentais),
+          // niche-* (leiloes nicho: rural, animal, embarcacao)
           const urlQuery = `${SB_URL}/rest/v1/sources?` +
             `select=id,name,base_url,metadata,last_run_at` +
-            `&or=(id.like.leiloeiro-nucleo-*,id.like.agg-*)&status=eq.active${filtroFonte}${filtroTempo}` +
+            `&or=(id.like.leiloeiro-*,id.like.agg-*,id.like.bank-*,id.like.plat-*,id.like.gov-*,id.like.niche-*)&status=eq.active${filtroFonte}${filtroTempo}` +
             `&order=last_run_at.asc.nullsfirst&limit=${LIMIT_HARD}`;
           const rSel = await fetch(urlQuery, {
             headers: { apikey: SR, authorization: `Bearer ${SR}` },
