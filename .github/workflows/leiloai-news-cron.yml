@@ -1,0 +1,89 @@
+# LeilôAI: Blog News Cron (gerador diario de 1 noticia com IA)
+#
+# Busca feeds RSS publicos confiaveis (Conjur, Migalhas, CNJ, G1 Economia,
+# InfoMoney, Agencia Brasil), filtra por keywords do nicho de leiloes,
+# escolhe o item mais recente ainda nao publicado e pede ao DeepSeek um
+# artigo original em pt-BR (700 a 900 palavras, zero travessoes, 2+
+# links internos, keywords trend naturais). Salva em conteudo_editorial
+# tipo=blog e submete a URL nova pro IndexNow (Bing/Yandex).
+#
+# Agenda: 1 run/dia as 12:00 UTC (09:00 BRT). Dedup por source_url
+# garante que se rodarmos mais vezes por dia, nao gera duplicata.
+#
+# Manual: Actions > "LeilôAI: Blog News Cron" > Run workflow.
+#
+# Setup pre-requisito:
+# 1. Neste repo (actions-engine): Settings > Secrets and variables > Actions
+#    LEILOAI_CRON_SECRET = mesmo valor do Vercel env var CRON_SECRET
+#    (Opcional) LEILOAI_APP_URL = URL base (default: https://leiloai.com)
+
+name: "LeilôAI: Blog News Cron"
+
+on:
+  schedule:
+    - cron: "0 12 * * *" # 09:00 BRT (1x por dia)
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Motivo do disparo manual"
+        required: false
+        default: "Manual trigger"
+
+concurrency:
+  group: leiloai-news-cron
+  cancel-in-progress: false
+
+jobs:
+  trigger-news-generator:
+    name: Call /api/cron/news-generator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger news-generator endpoint
+        id: trigger
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+          BASE_URL: ${{ vars.LEILOAI_APP_URL || 'https://leiloai.com' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET}" ]; then
+            echo "::error::LEILOAI_CRON_SECRET not configured in repo secrets"
+            exit 1
+          fi
+          echo "Triggering ${BASE_URL}/api/cron/news-generator"
+          RESPONSE_FILE=$(mktemp)
+          HTTP_CODE=$(curl -sS -o "${RESPONSE_FILE}" -w "%{http_code}" \
+            --max-time 90 \
+            -X POST \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            "${BASE_URL}/api/cron/news-generator")
+          echo "HTTP status: ${HTTP_CODE}"
+          echo "--- Response body ---"
+          cat "${RESPONSE_FILE}"
+          echo ""
+          echo "---------------------"
+          echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+          SLUG=$(cat "${RESPONSE_FILE}" | grep -oE '"slug":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")
+          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::News generator returned HTTP ${HTTP_CODE} (esperado 200)"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          BASE_URL: ${{ vars.LEILOAI_APP_URL || 'https://leiloai.com' }}
+        run: |
+          echo "## LeilôAI, Blog News Cron" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **HTTP:** \`${{ steps.trigger.outputs.http_code }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.trigger.outputs.slug }}" ]; then
+            echo "- **Slug publicado:** [\`${{ steps.trigger.outputs.slug }}\`](${BASE_URL}/blog/${{ steps.trigger.outputs.slug }})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Slug publicado:** (nenhum, sem candidatos ou erro)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Site:** https://leiloai.com/blog" >> $GITHUB_STEP_SUMMARY
