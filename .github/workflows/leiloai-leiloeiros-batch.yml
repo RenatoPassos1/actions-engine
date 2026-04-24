@@ -1,0 +1,310 @@
+# LeilôAI - Batch Playwright dos 585 leiloeiros oficiais
+#
+# Pega todos os sources `type=aggregator` com id LIKE 'leiloeiro-nucleo-%'
+# do Supabase, filtra por `last_run_at` (prioriza os que nao rodaram ha
+# mais tempo), processa em batch de 100 por run (~15-20 min).
+#
+# Com 585 leiloeiros e cron 6x/dia, cada leiloeiro e visitado a cada
+# ~1 dia em media. Processamento: Playwright headless intercepta
+# responses JSON + extrai DOM + detecta card patterns por fonte_id.
+# POSTa em /ingest do worker agregadores (Cloudflare).
+#
+# Secrets necessarios:
+#   LEILOAI_DISPARO_SECRET
+#   LEILOAI_SUPABASE_URL
+#   LEILOAI_SUPABASE_SR
+#   LEILOAI_AGREGADORES_URL (opcional, default workers.dev)
+
+name: "LeilôAI: Leiloeiros Batch (Playwright)"
+
+on:
+  schedule:
+    # 4x/dia: 05h, 11h, 17h, 23h UTC = 02h, 08h, 14h, 20h BRT
+    - cron: "0 5,11,17,23 * * *"
+  workflow_dispatch:
+    inputs:
+      limite:
+        description: "Quantos leiloeiros processar neste run (default 100, max 200)"
+        required: false
+        default: "100"
+        type: string
+      fonte_id:
+        description: "Filtrar por fonte_id especifico (vazio = todos)"
+        required: false
+        default: ""
+        type: string
+      forcar:
+        description: "Ignorar last_run_at (roda todos)"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: leiloai-leiloeiros-batch
+  cancel-in-progress: false
+
+env:
+  AGREGADORES_URL: ${{ secrets.LEILOAI_AGREGADORES_URL || 'https://leiloai-ingest-agregadores.renatopassos516.workers.dev' }}
+
+jobs:
+  scrape:
+    name: Playwright batch 100 leiloeiros
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright + chromium
+        run: |
+          mkdir -p /tmp/lei && cd /tmp/lei
+          npm init -y >/dev/null
+          npm install playwright@1
+          npx playwright install chromium --with-deps
+
+      - name: Scrape leiloeiros em batch
+        working-directory: /tmp/lei
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+          SUPABASE_URL: ${{ secrets.LEILOAI_SUPABASE_URL }}
+          SR: ${{ secrets.LEILOAI_SUPABASE_SR }}
+          LIMITE: ${{ github.event.inputs.limite || '100' }}
+          FONTE_ID: ${{ github.event.inputs.fonte_id || '' }}
+          FORCAR: ${{ github.event.inputs.forcar || 'false' }}
+        run: |
+          cat > /tmp/lei/batch.mjs <<'EOF'
+          import { chromium } from "playwright";
+
+          const AGG = process.env.AGREGADORES_URL;
+          const DISPARO = process.env.DISPARO;
+          const SB_URL = process.env.SUPABASE_URL;
+          const SR = process.env.SR;
+          const LIMITE = parseInt(process.env.LIMITE || "100", 10);
+          const FONTE_ID = process.env.FONTE_ID || "";
+          const FORCAR = process.env.FORCAR === "true";
+          const LIMIT_HARD = Math.min(LIMITE, 200);
+          const TIMEOUT_PAGE_MS = 20_000;
+          const BUDGET_MS = 25 * 60 * 1000; // 25 min budget (timeout workflow = 30 min)
+          const INICIO = Date.now();
+
+          if (!DISPARO || !SB_URL || !SR) {
+            throw new Error("Secrets faltando: LEILOAI_DISPARO_SECRET, LEILOAI_SUPABASE_URL, LEILOAI_SUPABASE_SR");
+          }
+
+          // 1) Busca leiloeiros priorizando os que ja rodaram ha mais tempo
+          const filtroFonte = FONTE_ID ? `&metadata->>fonte_id=eq.${FONTE_ID}` : "";
+          const filtroTempo = FORCAR ? "" : `&or=(last_run_at.is.null,last_run_at.lt.${encodeURIComponent(new Date(Date.now() - 12*3600*1000).toISOString())})`;
+          const urlQuery = `${SB_URL}/rest/v1/sources?` +
+            `select=id,name,base_url,metadata,last_run_at` +
+            `&id=like.leiloeiro-nucleo-*&status=eq.active${filtroFonte}${filtroTempo}` +
+            `&order=last_run_at.asc.nullsfirst&limit=${LIMIT_HARD}`;
+          const rSel = await fetch(urlQuery, {
+            headers: { apikey: SR, authorization: `Bearer ${SR}` },
+          });
+          if (!rSel.ok) throw new Error(`DB query: HTTP ${rSel.status}`);
+          const fontes = await rSel.json();
+          console.log(`Processando ${fontes.length} leiloeiros`);
+          if (!fontes.length) {
+            console.log("Nenhum leiloeiro elegivel agora");
+            process.exit(0);
+          }
+
+          // 2) Launch chromium
+          const browser = await chromium.launch({ headless: true });
+          const ctx = await browser.newContext({
+            userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 LeiloAI-Crawler/1.0",
+            locale: "pt-BR",
+            viewport: { width: 1366, height: 900 },
+            bypassCSP: true,
+          });
+
+          const resumo = {ok:0, vazios:0, erros:0, total_inseridos:0, detalhes:[]};
+
+          for (const fonte of fontes) {
+            if (Date.now() - INICIO > BUDGET_MS) {
+              console.log(`Budget 25min atingido, parando. Processados: ${resumo.ok + resumo.vazios + resumo.erros}/${fontes.length}`);
+              break;
+            }
+
+            const label = `${fonte.id} ${fonte.base_url}`;
+            const page = await ctx.newPage();
+            const respJSON = [];
+            page.on("response", async (resp) => {
+              const ct = resp.headers()["content-type"] ?? "";
+              if (!ct.includes("json")) return;
+              if (!/imov|leilo|lote|busca|search|catalog|propert|ativo/i.test(resp.url())) return;
+              try { respJSON.push(await resp.json()); } catch {}
+            });
+            await page.route(/\.(woff2?|ttf|otf|eot)$/i, r => r.abort());
+
+            let items = [];
+            let erro = null;
+            try {
+              await page.goto(fonte.base_url, { timeout: TIMEOUT_PAGE_MS, waitUntil: "domcontentloaded" });
+              // Aguarda 3s para carregar cards iniciais + scroll para lazy
+              await page.waitForTimeout(2500);
+              for (let s = 0; s < 4; s++) {
+                await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                await page.waitForTimeout(400);
+              }
+
+              // 3a) tenta interceptar responses JSON
+              for (const body of respJSON) {
+                const lista = extrairLista(body);
+                if (Array.isArray(lista) && lista.length && detectarImovel(lista[0])) {
+                  items = lista.slice(0, 150).map(r => normalizar(r, fonte));
+                  break;
+                }
+              }
+
+              // 3b) fallback DOM - cards com href de imovel/lote
+              if (!items.length) {
+                items = await page.$$eval(
+                  "a[href*='/imovel'], a[href*='/lote'], a[href*='/leilao/'], a[href*='/imoveis/'], a[href*='/veiculos/'], .card a[href], .card-imovel a, .item-imovel a, .card-lote a, [data-imovel-id] a, [data-lote-id] a, article a",
+                  (els) => {
+                    const out = [];
+                    const vistos = new Set();
+                    for (const el of els.slice(0, 300)) {
+                      const href = el.getAttribute("href") || "";
+                      if (!href || href === "#" || href.startsWith("javascript:")) continue;
+                      if (vistos.has(href)) continue;
+                      vistos.add(href);
+                      const bloco = el.closest("article, .card, .card-imovel, .card-lote, li, .item") || el.parentElement || el;
+                      const texto = (bloco.textContent || "").trim().replace(/\s+/g, " ");
+                      if (texto.length < 20) continue;
+                      if (!/leil|lote|imov|ve[ií]cul|apart|casa|terreno|arremat|edital/i.test(texto)) continue;
+                      const titulo = (bloco.querySelector("h1,h2,h3,h4,.titulo,.nome,.title,strong")?.textContent || "").trim() || texto.slice(0, 100);
+                      const cidadeUf = (bloco.querySelector(".cidade,.local,.municipio,.city,.endereco,address")?.textContent || "").trim();
+                      const preco = (bloco.querySelector(".preco,.valor,.lance,.lance-minimo,.price,[class*=valor],[class*=preco]")?.textContent || "").trim();
+                      const m = cidadeUf.match(/([A-ZÇÀÁÂÃÉÊÍÓÔÕÚÜ][a-zçàáâãéêíóôõúü\s]+)\s*[-–\/,]\s*([A-Z]{2})/);
+                      out.push({
+                        id: href.replace(/\W+/g, "-").slice(-40),
+                        titulo: titulo.slice(0, 200),
+                        cidade: m?.[1]?.trim() || null,
+                        uf: m?.[2] || null,
+                        lance_minimo: preco,
+                        url: href,
+                      });
+                      if (out.length >= 120) break;
+                    }
+                    return out;
+                  },
+                );
+              }
+
+            } catch (e) {
+              erro = (e && e.message || String(e)).slice(0, 200);
+            } finally {
+              await page.close().catch(()=>{});
+            }
+
+            // marca last_run_at no DB (independente do resultado)
+            await marcarRun(fonte.id, items.length > 0, erro).catch(() => {});
+
+            if (items.length) {
+              // POST para /ingest
+              try {
+                const r = await fetch(`${AGG}/ingest`, {
+                  method: "POST",
+                  headers: { "x-disparo-secret": DISPARO, "content-type": "application/json" },
+                  body: JSON.stringify({ source_id: fonte.id, items: items.slice(0, 150) }),
+                });
+                if (r.ok) {
+                  const j = await r.json();
+                  resumo.total_inseridos += (j.inseridos || 0);
+                  resumo.ok++;
+                  console.log(`[OK] ${label}: ${items.length} extraidos, ${j.inseridos} upserted`);
+                } else {
+                  resumo.erros++;
+                  const txt = await r.text();
+                  console.log(`[POST erro] ${label}: HTTP ${r.status} - ${txt.slice(0, 100)}`);
+                }
+              } catch (e) {
+                resumo.erros++;
+                console.log(`[POST fail] ${label}: ${e.message}`);
+              }
+            } else if (erro) {
+              resumo.erros++;
+              console.log(`[ERR] ${label}: ${erro}`);
+            } else {
+              resumo.vazios++;
+              console.log(`[0 items] ${label}`);
+            }
+          }
+
+          await browser.close();
+
+          console.log(`\n=== RESUMO ===`);
+          console.log(JSON.stringify(resumo, null, 2));
+
+          // helpers
+          function extrairLista(body, prof = 0) {
+            if (prof > 4) return null;
+            if (Array.isArray(body) && body.length) return body;
+            if (body && typeof body === "object") {
+              for (const k of ["imoveis","lotes","items","results","data","propertyList","anuncios","listagem","hits","content"]) {
+                if (Array.isArray(body[k]) && body[k].length) return body[k];
+              }
+              for (const v of Object.values(body)) {
+                if (v && typeof v === "object") {
+                  const r = extrairLista(v, prof+1);
+                  if (r) return r;
+                }
+              }
+            }
+            return null;
+          }
+          function detectarImovel(x) {
+            if (!x || typeof x !== "object") return false;
+            const keys = Object.keys(x).join(",").toLowerCase();
+            return /imov|lote|bem|auct|imov|address|endereco|city|cidade|uf|estado|preco|valor|lance/.test(keys);
+          }
+          function normalizar(raw, fonte) {
+            const id = String(raw.id ?? raw.codigo ?? raw.numero ?? raw.idImovel ?? raw.slug ?? "").slice(0, 64);
+            if (!id) return null;
+            const urlRel = String(raw.url ?? raw.link ?? raw.permalink ?? `/imovel/${id}`);
+            const host = new URL(fonte.base_url).host;
+            const url = urlRel.startsWith("http") ? urlRel : `${fonte.base_url.replace(/\/$/, "")}${urlRel.startsWith("/") ? urlRel : `/${urlRel}`}`;
+            return {
+              id,
+              titulo: (raw.titulo ?? raw.nome ?? raw.title ?? raw.descricao ?? `Item ${id}`).toString().slice(0, 250),
+              descricao: (raw.descricao ?? raw.description ?? "").toString().slice(0, 500),
+              uf: raw.uf ?? raw.estado ?? raw.state ?? null,
+              cidade: raw.cidade ?? raw.municipio ?? raw.city ?? null,
+              bairro: raw.bairro ?? raw.neighborhood ?? null,
+              endereco: raw.endereco ?? raw.address ?? null,
+              area_sqm: raw.area ?? raw.areaTotal ?? raw.area_sqm ?? null,
+              lance_minimo: raw.lanceMinimo ?? raw.valorMinimo ?? raw.preco ?? raw.valor ?? raw.lance ?? null,
+              avaliacao: raw.avaliacao ?? raw.valorAvaliacao ?? null,
+              edital_pdf_url: raw.editalUrl ?? raw.urlEdital ?? null,
+              url,
+              raw_payload: { host },
+            };
+          }
+          async function marcarRun(id, ok, erro) {
+            await fetch(`${SB_URL}/rest/v1/sources?id=eq.${id}`, {
+              method: "PATCH",
+              headers: {
+                apikey: SR,
+                authorization: `Bearer ${SR}`,
+                "content-type": "application/json",
+                prefer: "return=minimal",
+              },
+              body: JSON.stringify({
+                last_run_at: new Date().toISOString(),
+                last_run_ok: ok,
+                last_error: erro,
+              }),
+            });
+          }
+          EOF
+          cd /tmp/lei && node --experimental-vm-modules batch.mjs
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI - Leiloeiros Batch" >> $GITHUB_STEP_SUMMARY
+          echo "- Data: $(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- Worker: \`${AGREGADORES_URL}\`" >> $GITHUB_STEP_SUMMARY
