@@ -120,6 +120,9 @@ jobs:
       - name: Validate generated content
         run: node tools/validate-content.mjs
 
+      - name: Rebuild Next.js content index (coverImage dos novos MDX)
+        run: node tools/rebuild-content-index.mjs
+
       - name: Check for changes
         id: changes
         run: |
