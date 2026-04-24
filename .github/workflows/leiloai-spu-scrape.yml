@@ -45,17 +45,19 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Playwright + chromium
+      - name: Install Playwright + chromium (local em /tmp/spu)
         run: |
-          npm install -g playwright@1
-          npx -y playwright install chromium --with-deps
+          mkdir -p /tmp/spu && cd /tmp/spu
+          npm init -y >/dev/null
+          npm install playwright@1
+          npx playwright install chromium --with-deps
 
       - name: Scrape SPU portal
+        working-directory: /tmp/spu
         env:
           DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
           MAX_CIDADES: ${{ github.event.inputs.max_cidades || '27' }}
         run: |
-          mkdir -p /tmp/spu
           cat > /tmp/spu/scrape.mjs <<'EOF'
           import { chromium } from "playwright";
 
@@ -204,7 +206,7 @@ jobs:
           }
           console.log(`SPU scrape ok: ${items.length} items, ${inseridos} inseridos`);
           EOF
-          node --experimental-vm-modules /tmp/spu/scrape.mjs
+          cd /tmp/spu && node --experimental-vm-modules scrape.mjs
 
       - name: Summary
         if: always()
