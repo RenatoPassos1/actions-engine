@@ -86,7 +86,7 @@ jobs:
           const LIMITE = parseInt(process.env.LIMITE || "100", 10);
           const FONTE_ID = process.env.FONTE_ID || "";
           const FORCAR = process.env.FORCAR === "true";
-          const LIMIT_HARD = Math.min(LIMITE, 200);
+          const LIMIT_HARD = Math.min(LIMITE, 500);
           const TIMEOUT_PAGE_MS = 20_000;
           const BUDGET_MS = 25 * 60 * 1000; // 25 min budget (timeout workflow = 30 min)
           const INICIO = Date.now();
