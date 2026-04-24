@@ -1,0 +1,448 @@
+# LeilôAI — Agregadores SPA scrape via Playwright
+#
+# Núcleo, Sodré Santoro, Mega Leilões, Portal Zuk, Frazão e Hasta são
+# SPA Angular/Next puros — listagem de lotes só aparece após JS rodar.
+# Cloudflare Worker fetch comum não vê os cards. Resolução: Playwright
+# headless via GitHub Actions (repo público = minutos ilimitados).
+#
+# Cada agregador tem seu seletor próprio mapeado em SCRAPERS.
+# POSTa em chunks de 100 para o worker leiloai-ingest-agregadores
+# /ingest com source_id correto.
+#
+# Cron: a cada 6h (4x/dia). Manual via workflow_dispatch.
+
+name: "LeilôAI: Agregadores Playwright"
+
+on:
+  schedule:
+    - cron: "30 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: "Lista de sources (separadas por espaço) ou 'all'"
+        required: false
+        default: "all"
+        type: string
+
+concurrency:
+  group: leiloai-agregadores-pw
+  cancel-in-progress: false
+
+env:
+  AGREGADORES_URL: ${{ secrets.LEILOAI_AGREGADORES_URL || 'https://leiloai-ingest-agregadores.renatopassos516.workers.dev' }}
+
+jobs:
+  scrape:
+    name: Playwright agregadores
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright + chromium
+        run: |
+          mkdir -p /tmp/agg && cd /tmp/agg
+          npm init -y >/dev/null
+          npm install playwright@1
+          npx playwright install chromium --with-deps
+
+      - name: Scrape agregadores SPA
+        working-directory: /tmp/agg
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+          SOURCES: ${{ github.event.inputs.sources || 'all' }}
+        run: |
+          cat > /tmp/agg/scrape.mjs <<'EOF'
+          import { chromium } from "playwright";
+
+          const AGG = process.env.AGREGADORES_URL;
+          const DISPARO = process.env.DISPARO;
+          const FILTRO = (process.env.SOURCES ?? "all").split(/\s+/).filter(Boolean);
+          if (!DISPARO) throw new Error("LEILOAI_DISPARO_SECRET ausente");
+
+          // Cada scraper define como navegar e extrair cards do site.
+          // Strategy: abre URL, espera networkidle + selector, intercepta
+          // responses JSON internas, extrai DOM, combina e POSTa.
+          const SCRAPERS = [
+            {
+              source_id: "agg-nucleo",
+              name: "Núcleo Leilões",
+              url: "https://www.nucleoleiloes.com.br/imoveis",
+              waitSelector: "a[href*='/imovel/'], .card, [data-imovel-id]",
+              extract: extractNucleo,
+            },
+            {
+              source_id: "agg-sodre",
+              name: "Sodré Santoro",
+              url: "https://www.sodresantoro.com.br/leiloes",
+              waitSelector: "a[href*='/leilao/'], .card-leilao, .item-leilao",
+              extract: extractSodre,
+            },
+            {
+              source_id: "agg-mega",
+              name: "Mega Leilões",
+              url: "https://www.megaleiloes.com.br/imoveis",
+              waitSelector: "a[href*='/imoveis/'], .card-lote, .lote-item",
+              extract: extractMega,
+            },
+            {
+              source_id: "agg-zuk",
+              name: "Portal Zuk",
+              url: "https://www.portalzuk.com.br/imoveis-em-leilao",
+              waitSelector: "a[href*='/imovel'], .card-imovel, .property-card",
+              extract: extractZuk,
+            },
+            {
+              source_id: "agg-frazao",
+              name: "Frazão Leilões",
+              url: "https://www.frazaoleiloes.com.br/imoveis",
+              waitSelector: "a[href*='/lote/'], .card-lote, .item-lote",
+              extract: extractFrazao,
+            },
+            {
+              source_id: "agg-hasta",
+              name: "Hasta Leilões",
+              url: "https://www.hastaleiloes.com.br/imoveis",
+              waitSelector: "a[href*='/lote/'], .card-lote",
+              extract: extractGenerico,
+            },
+            {
+              source_id: "agg-biasi",
+              name: "Biasi Leilões",
+              url: "https://www.biasileiloes.com.br/imoveis",
+              waitSelector: "a[href*='/lote/'], .card-lote, .item-lote",
+              extract: extractGenerico,
+            },
+          ];
+
+          const ativos = SCRAPERS.filter((s) =>
+            FILTRO[0] === "all" || FILTRO.includes(s.source_id) || FILTRO.includes(s.source_id.replace("agg-", "")),
+          );
+
+          const browser = await chromium.launch({ headless: true });
+          const ctx = await browser.newContext({
+            userAgent:
+              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 LeiloAI-Crawler/1.0",
+            locale: "pt-BR",
+            viewport: { width: 1366, height: 900 },
+          });
+
+          const resumoFinal = [];
+          for (const sc of ativos) {
+            console.log(`\n=== ${sc.source_id} ===`);
+            const page = await ctx.newPage();
+            const responsesAPI = [];
+            page.on("response", async (resp) => {
+              const url = resp.url();
+              const ct = resp.headers()["content-type"] ?? "";
+              if (!ct.includes("json")) return;
+              if (!/imov|leilo|lote|search|busca|propert/i.test(url)) return;
+              try {
+                const body = await resp.json();
+                responsesAPI.push({ url, body });
+              } catch {}
+            });
+
+            try {
+              console.log(`Navegando para ${sc.url}…`);
+              await page.goto(sc.url, { waitUntil: "networkidle", timeout: 45_000 });
+              try {
+                await page.waitForSelector(sc.waitSelector, { timeout: 20_000 });
+              } catch {
+                console.warn(`Selector "${sc.waitSelector}" não apareceu, extraindo mesmo assim`);
+              }
+              for (let i = 0; i < 6; i++) {
+                await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                await page.waitForTimeout(700);
+              }
+              const items = await sc.extract(page, responsesAPI);
+              console.log(`${sc.source_id}: ${items.length} items extraídos`);
+
+              if (items.length) {
+                const CHUNK = 100;
+                let inseridos = 0;
+                for (let i = 0; i < items.length; i += CHUNK) {
+                  const slice = items.slice(i, i + CHUNK);
+                  const resp = await fetch(`${AGG}/ingest`, {
+                    method: "POST",
+                    headers: {
+                      "x-disparo-secret": DISPARO,
+                      "content-type": "application/json",
+                    },
+                    body: JSON.stringify({ source_id: sc.source_id, items: slice }),
+                  });
+                  const txt = await resp.text();
+                  if (resp.ok) {
+                    try { inseridos += JSON.parse(txt).inseridos ?? 0; } catch {}
+                  } else {
+                    console.warn(`POST chunk ${i}: HTTP ${resp.status} ${txt.slice(0, 200)}`);
+                  }
+                }
+                console.log(`${sc.source_id}: ${inseridos} inseridos`);
+                resumoFinal.push({ source_id: sc.source_id, items: items.length, inseridos });
+              } else {
+                resumoFinal.push({ source_id: sc.source_id, items: 0, inseridos: 0 });
+              }
+            } catch (err) {
+              console.error(`${sc.source_id} falhou:`, err.message);
+              resumoFinal.push({ source_id: sc.source_id, erro: err.message });
+            } finally {
+              await page.close();
+            }
+          }
+
+          await browser.close();
+          console.log("\n=== RESUMO ===");
+          console.log(JSON.stringify(resumoFinal, null, 2));
+
+          // ---- extractors ----
+          async function extractNucleo(page, responsesAPI) {
+            // Tenta API interna primeiro
+            for (const { body } of responsesAPI) {
+              const lista = body?.imoveis ?? body?.data ?? body?.results ?? body?.items ?? body;
+              if (Array.isArray(lista) && lista.length && lista[0]?.id) {
+                return lista.slice(0, 200).map((r) => normalizar(r, "nucleoleiloes.com.br"));
+              }
+            }
+            return await page.$$eval("a[href*='/imovel/'], a[href*='/lote/'], .card", (els) =>
+              els.slice(0, 100).map((el) => extrairCardDOM(el)).filter(Boolean),
+            );
+          }
+          async function extractSodre(page, responsesAPI) {
+            for (const { body } of responsesAPI) {
+              const lista = body?.lotes ?? body?.data ?? body?.items ?? body;
+              if (Array.isArray(lista) && lista.length) return lista.slice(0, 200).map((r) => normalizar(r, "sodresantoro.com.br"));
+            }
+            return await page.$$eval(
+              "a[href*='/leilao/'], a[href*='/lote/'], .card-leilao, .item-leilao",
+              (els) => els.slice(0, 100).map((el) => extrairCardDOM(el)).filter(Boolean),
+            );
+          }
+          async function extractMega(page, responsesAPI) {
+            for (const { body } of responsesAPI) {
+              const lista = body?.lotes ?? body?.imoveis ?? body?.data ?? body?.items ?? body;
+              if (Array.isArray(lista) && lista.length) return lista.slice(0, 200).map((r) => normalizar(r, "megaleiloes.com.br"));
+            }
+            return await page.$$eval(
+              "a[href*='/imoveis/'], a[href*='/lote/'], .card-lote, .lote-item",
+              (els) => els.slice(0, 100).map((el) => extrairCardDOM(el)).filter(Boolean),
+            );
+          }
+          async function extractZuk(page, responsesAPI) {
+            for (const { body } of responsesAPI) {
+              const lista = body?.imoveis ?? body?.properties ?? body?.data ?? body?.items ?? body;
+              if (Array.isArray(lista) && lista.length) return lista.slice(0, 200).map((r) => normalizar(r, "portalzuk.com.br"));
+            }
+            return await page.$$eval(
+              "a[href*='/imovel'], a[href*='/lote'], .property-card, .card-imovel",
+              (els) => els.slice(0, 100).map((el) => extrairCardDOM(el)).filter(Boolean),
+            );
+          }
+          async function extractFrazao(page, responsesAPI) {
+            for (const { body } of responsesAPI) {
+              const lista = body?.lotes ?? body?.data ?? body?.items ?? body;
+              if (Array.isArray(lista) && lista.length) return lista.slice(0, 200).map((r) => normalizar(r, "frazaoleiloes.com.br"));
+            }
+            return await page.$$eval(
+              "a[href*='/lote/'], a[href*='/leilao/'], .card-lote, .item-lote",
+              (els) => els.slice(0, 100).map((el) => extrairCardDOM(el)).filter(Boolean),
+            );
+          }
+          async function extractGenerico(page) {
+            return await page.$$eval(
+              "a[href*='/lote/'], a[href*='/imovel/'], .card-lote, .card-imovel, .item-lote, [data-id]",
+              (els) => els.slice(0, 100).map((el) => extrairCardDOM(el)).filter(Boolean),
+            );
+          }
+
+          function normalizar(r, host) {
+            const id = String(r.id ?? r.idImovel ?? r.codigo ?? r.numero ?? r.slug ?? "");
+            if (!id) return null;
+            const url = String(r.url ?? r.permalink ?? r.link ?? `/imovel/${id}`);
+            return {
+              id,
+              titulo: r.titulo ?? r.nome ?? r.title ?? r.descricao ?? "Lote",
+              descricao: r.descricao ?? r.description ?? null,
+              uf: r.uf ?? r.estado ?? r.state ?? null,
+              cidade: r.cidade ?? r.municipio ?? r.city ?? null,
+              bairro: r.bairro ?? r.neighborhood ?? null,
+              endereco: r.endereco ?? r.address ?? null,
+              area: r.area ?? r.areaTotal ?? r.areaUtil ?? null,
+              lance_minimo: r.lanceMinimo ?? r.valorMinimo ?? r.preco ?? r.valor ?? r.lance ?? null,
+              avaliacao: r.avaliacao ?? r.valorAvaliacao ?? null,
+              edital_pdf_url: r.editalUrl ?? r.urlEdital ?? null,
+              url: url.startsWith("http") ? url : `https://www.${host}${url.startsWith("/") ? url : `/${url}`}`,
+              raw_payload: { fonte_api: host },
+            };
+          }
+          EOF
+
+          # Helper extrairCardDOM injetado em todas as page.$$eval via context init
+          cat >> /tmp/agg/scrape.mjs <<'EOF2'
+
+          // Injeta helper extrairCardDOM no browser context
+          // (Playwright limitation: function refs nao cruzam o boundary,
+          // mas como sao $$eval inline, replico a logica em cada extrator).
+          EOF2
+
+          # patch: remover o JS file da chamada extrairCardDOM com inline JS direto
+          # (mais simples: gerar versao com helper definido em cada $$eval)
+          cat > /tmp/agg/scrape.mjs <<'EOF'
+          import { chromium } from "playwright";
+
+          const AGG = process.env.AGREGADORES_URL;
+          const DISPARO = process.env.DISPARO;
+          const FILTRO = (process.env.SOURCES ?? "all").split(/\s+/).filter(Boolean);
+          if (!DISPARO) throw new Error("LEILOAI_DISPARO_SECRET ausente");
+
+          const SCRAPERS = [
+            { source_id: "agg-nucleo", url: "https://www.nucleoleiloes.com.br/imoveis", host: "nucleoleiloes.com.br", waitSelector: "a[href*='/imovel/'], .card" },
+            { source_id: "agg-sodre", url: "https://www.sodresantoro.com.br/leiloes", host: "sodresantoro.com.br", waitSelector: "a[href*='/leilao/'], .card-leilao, .item-leilao" },
+            { source_id: "agg-mega", url: "https://www.megaleiloes.com.br/imoveis", host: "megaleiloes.com.br", waitSelector: "a[href*='/imoveis/'], .card-lote, .lote-item" },
+            { source_id: "agg-zuk", url: "https://www.portalzuk.com.br/imoveis-em-leilao", host: "portalzuk.com.br", waitSelector: "a[href*='/imovel'], .card-imovel, .property-card" },
+            { source_id: "agg-frazao", url: "https://www.frazaoleiloes.com.br/imoveis", host: "frazaoleiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
+            { source_id: "agg-hasta", url: "https://www.hastaleiloes.com.br/imoveis", host: "hastaleiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
+            { source_id: "agg-biasi", url: "https://www.biasileiloes.com.br/imoveis", host: "biasileiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
+          ];
+
+          const ativos = SCRAPERS.filter((s) =>
+            FILTRO[0] === "all" || FILTRO.includes(s.source_id) || FILTRO.includes(s.source_id.replace("agg-", "")),
+          );
+
+          const browser = await chromium.launch({ headless: true });
+          const ctx = await browser.newContext({
+            userAgent:
+              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 LeiloAI-Crawler/1.0",
+            locale: "pt-BR",
+            viewport: { width: 1366, height: 900 },
+          });
+
+          const resumoFinal = [];
+          for (const sc of ativos) {
+            console.log(`\n=== ${sc.source_id} ===`);
+            const page = await ctx.newPage();
+            const responsesAPI = [];
+            page.on("response", async (resp) => {
+              const url = resp.url();
+              const ct = resp.headers()["content-type"] ?? "";
+              if (!ct.includes("json")) return;
+              if (!/imov|leilo|lote|search|busca|propert|catalog/i.test(url)) return;
+              try {
+                const body = await resp.json();
+                responsesAPI.push({ url, body });
+              } catch {}
+            });
+
+            try {
+              console.log(`Navegando para ${sc.url}…`);
+              await page.goto(sc.url, { waitUntil: "networkidle", timeout: 45_000 });
+              try {
+                await page.waitForSelector(sc.waitSelector, { timeout: 20_000 });
+              } catch {
+                console.warn(`Selector "${sc.waitSelector}" não apareceu, extraindo mesmo assim`);
+              }
+              for (let i = 0; i < 6; i++) {
+                await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                await page.waitForTimeout(700);
+              }
+
+              // Tenta extrair via API interceptada
+              let items = [];
+              for (const { body } of responsesAPI) {
+                const lista = body?.lotes ?? body?.imoveis ?? body?.properties ?? body?.results ?? body?.data ?? body?.items ?? (Array.isArray(body) ? body : null);
+                if (Array.isArray(lista) && lista.length && (lista[0]?.id ?? lista[0]?.codigo ?? lista[0]?.slug)) {
+                  items = lista.slice(0, 200).map((r) => normalizarAPI(r, sc.host)).filter(Boolean);
+                  if (items.length) break;
+                }
+              }
+
+              // Fallback DOM
+              if (!items.length) {
+                items = await page.$$eval(sc.waitSelector, (els, host) => {
+                  function extrairCardDOM(el, host) {
+                    const link = el.tagName === "A" ? el : el.querySelector("a[href]");
+                    const href = link?.getAttribute("href");
+                    if (!href) return null;
+                    const idMatch = href.match(/\/(\d+)\/?$|[?&]id=(\d+)|\/(?:imovel|lote|leilao)\/(\d+)|\/([a-z0-9-]+)\/?$/);
+                    const id = idMatch?.[1] ?? idMatch?.[2] ?? idMatch?.[3] ?? idMatch?.[4] ?? href.replace(/\W+/g, "-").slice(-32);
+                    const titulo = el.querySelector("h1,h2,h3,h4,.titulo,.nome,.title")?.textContent?.trim() ?? "Lote";
+                    const cidade = el.querySelector(".cidade,.municipio,.local,.city")?.textContent?.trim() ?? null;
+                    const uf = el.querySelector(".uf,.estado")?.textContent?.trim()?.slice(0, 2) ?? null;
+                    const valor = el.querySelector(".valor,.preco,.lance,.lance-minimo,.price")?.textContent?.trim() ?? null;
+                    return {
+                      id, titulo, cidade, uf, lance_minimo: valor,
+                      url: href.startsWith("http") ? href : `https://www.${host}${href.startsWith("/") ? href : `/${href}`}`,
+                    };
+                  }
+                  return els.slice(0, 100).map((el) => extrairCardDOM(el, host)).filter(Boolean);
+                }, sc.host);
+              }
+
+              console.log(`${sc.source_id}: ${items.length} items extraídos`);
+
+              if (items.length) {
+                const CHUNK = 100;
+                let inseridos = 0;
+                for (let i = 0; i < items.length; i += CHUNK) {
+                  const slice = items.slice(i, i + CHUNK);
+                  const resp = await fetch(`${AGG}/ingest`, {
+                    method: "POST",
+                    headers: { "x-disparo-secret": DISPARO, "content-type": "application/json" },
+                    body: JSON.stringify({ source_id: sc.source_id, items: slice }),
+                  });
+                  const txt = await resp.text();
+                  if (resp.ok) {
+                    try { inseridos += JSON.parse(txt).inseridos ?? 0; } catch {}
+                  } else {
+                    console.warn(`POST chunk ${i}: HTTP ${resp.status} ${txt.slice(0, 200)}`);
+                  }
+                }
+                console.log(`${sc.source_id}: ${inseridos} inseridos`);
+                resumoFinal.push({ source_id: sc.source_id, items: items.length, inseridos });
+              } else {
+                resumoFinal.push({ source_id: sc.source_id, items: 0, inseridos: 0 });
+              }
+            } catch (err) {
+              console.error(`${sc.source_id} falhou:`, err.message);
+              resumoFinal.push({ source_id: sc.source_id, erro: err.message });
+            } finally {
+              await page.close();
+            }
+          }
+
+          await browser.close();
+          console.log("\n=== RESUMO ===");
+          console.log(JSON.stringify(resumoFinal, null, 2));
+
+          function normalizarAPI(r, host) {
+            const id = String(r.id ?? r.idImovel ?? r.codigo ?? r.numero ?? r.slug ?? "");
+            if (!id) return null;
+            const url = String(r.url ?? r.permalink ?? r.link ?? `/imovel/${id}`);
+            return {
+              id,
+              titulo: r.titulo ?? r.nome ?? r.title ?? r.descricao ?? "Lote",
+              descricao: r.descricao ?? r.description ?? null,
+              uf: r.uf ?? r.estado ?? r.state ?? null,
+              cidade: r.cidade ?? r.municipio ?? r.city ?? null,
+              bairro: r.bairro ?? r.neighborhood ?? null,
+              endereco: r.endereco ?? r.address ?? null,
+              area: r.area ?? r.areaTotal ?? r.areaUtil ?? null,
+              lance_minimo: r.lanceMinimo ?? r.valorMinimo ?? r.preco ?? r.valor ?? r.lance ?? null,
+              avaliacao: r.avaliacao ?? r.valorAvaliacao ?? null,
+              edital_pdf_url: r.editalUrl ?? r.urlEdital ?? null,
+              url: url.startsWith("http") ? url : `https://www.${host}${url.startsWith("/") ? url : `/${url}`}`,
+              raw_payload: { fonte_api: host },
+            };
+          }
+          EOF
+          cd /tmp/agg && node --experimental-vm-modules scrape.mjs
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI — Agregadores Playwright" >> $GITHUB_STEP_SUMMARY
+          echo "- Data: $(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- Worker: \`${AGREGADORES_URL}\`" >> $GITHUB_STEP_SUMMARY
