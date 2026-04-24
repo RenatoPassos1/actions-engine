@@ -112,11 +112,14 @@ jobs:
           - { dir: "services/ingestion/doe",         name: "doe" }
           - { dir: "services/ingestion/djen",        name: "djen" }
           - { dir: "services/ingestion/datajud",     name: "datajud" }
-          - { dir: "services/ingestion/bancos",      name: "bancos" }
-          - { dir: "services/ingestion/agregadores", name: "agregadores" }
-          - { dir: "services/enrichment",            name: "enrichment" }
-          - { dir: "services/enrichment-ia",         name: "enrichment-ia" }
-          - { dir: "services/rate-limit",            name: "rate-limit" }
+          - { dir: "services/ingestion/bancos",       name: "bancos" }
+          - { dir: "services/ingestion/agregadores",  name: "agregadores" }
+          - { dir: "services/ingestion/marketplaces", name: "marketplaces" }
+          - { dir: "services/ingestion/rental",       name: "rental" }
+          - { dir: "services/enrichment",             name: "enrichment" }
+          - { dir: "services/enrichment-ia",          name: "enrichment-ia" }
+          - { dir: "services/rate-limit",             name: "rate-limit" }
+          - { dir: "services/orchestrator",           name: "orchestrator" }
 
     steps:
       - name: Checkout leilao-watch

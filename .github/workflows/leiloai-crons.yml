@@ -12,12 +12,18 @@ name: "LeilôAI: Crons"
 
 on:
   schedule:
-    # bancos: 11h UTC (08h BRT)
+    # bancos + ingestao_diaria (doe/djen/datajud/agregadores): 11h UTC (08h BRT)
     - cron: '0 11 * * *'
     # enrichment: a cada 2h
     - cron: '0 */2 * * *'
     # hard-delete LGPD: diário, 03h UTC (00h BRT)
     - cron: '0 3 * * *'
+    # marketplaces: a cada 4h (ML API + scrapers OLX/ZAP/VivaReal)
+    - cron: '15 */4 * * *'
+    # rental: 1x/dia 09h UTC (alugueis mudam lento)
+    - cron: '0 9 * * *'
+    # enrichment-ia: a cada 3h (extracao de editais via OpenAI)
+    - cron: '20 */3 * * *'
   workflow_dispatch:
     inputs:
       job:
@@ -30,6 +36,10 @@ on:
           - bancos
           - enrichment
           - hard_delete
+          - marketplaces
+          - rental
+          - enrichment_ia
+          - orchestrator
 
 concurrency:
   group: leiloai-crons-${{ github.event.schedule || github.event.inputs.job }}
@@ -92,6 +102,81 @@ jobs:
           curl -sSf -H "x-disparo-secret: ${DISPARO}" \
             "https://leiloai-ingest-${{ matrix.worker }}.renatopassos516.workers.dev/run" \
             --max-time 600 \
+            | head -c 500
+          echo
+
+  marketplaces:
+    if: >-
+      github.event.schedule == '15 */4 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'marketplaces'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara worker marketplaces (ML API + OLX/ZAP/VivaReal)
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingestao-marketplaces.renatopassos516.workers.dev/run" \
+            --max-time 600 \
+            | head -c 500
+          echo
+
+  rental:
+    if: >-
+      github.event.schedule == '0 9 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'rental'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara worker rental (QuintoAndar/VivaReal/ZAP aluguel)
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingestao-rental.renatopassos516.workers.dev/run" \
+            --max-time 600 \
+            | head -c 500
+          echo
+
+  enrichment_ia:
+    if: >-
+      github.event.schedule == '20 */3 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'enrichment_ia'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara worker enrichment-ia (extracao editais OpenAI)
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-enrichment-ia.renatopassos516.workers.dev/run" \
+            --max-time 600 \
+            | head -c 500
+          echo
+
+  orchestrator_safety:
+    # Safety net: se algum cron acima falhar, orchestrator decide quais
+    # workers re-disparar com base na cadencia em jobs_log
+    if: >-
+      github.event.inputs.job == 'orchestrator'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispara orchestrator tick
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-orchestrator.renatopassos516.workers.dev/tick" \
             | head -c 500
           echo
 
