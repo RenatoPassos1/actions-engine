@@ -1,14 +1,13 @@
 # LeiloAI - Backup Weekly: pg_dump completo do Postgres Supabase
-# subido para Cloudflare R2 (S3 compativel) toda madrugada de domingo.
+# subido para Cloudflare R2 via wrangler (API token Cloudflare).
 #
 # Falha no upload ou no dump NAO derruba CI. Em caso de erro, abre issue com label "incident".
 #
 # Secrets necessarios:
 #   LEILOAI_SUPABASE_DB_URL   - postgres://... (Pooler ou direct, com password)
-#   CF_R2_ACCESS_KEY_ID
-#   CF_R2_SECRET_ACCESS_KEY
-#   CF_R2_ACCOUNT_ID
-#   CF_R2_BUCKET              - nome do bucket R2 (ex: leiloai-backups)
+#   LEILOAI_CF_TOKEN          - Cloudflare API token com permissao R2:Edit
+#   LEILOAI_CF_ACCOUNT        - Cloudflare account ID
+#   CF_R2_BUCKET              - nome do bucket R2 (default: leiloai-backups)
 
 name: "LeiloAI: Backup Weekly"
 
@@ -65,47 +64,35 @@ jobs:
           fi
           exit 0
 
-      - name: Configura aws CLI para R2
+      - name: Setup Node + Wrangler
         if: steps.dump.outputs.ok == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -e
-          mkdir -p ~/.aws
-          cat > ~/.aws/config <<EOF
-          [default]
-          region = auto
-          output = json
-          EOF
-          cat > ~/.aws/credentials <<EOF
-          [default]
-          aws_access_key_id = ${AWS_ACCESS_KEY_ID}
-          aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
-          EOF
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
-      - name: Upload para R2
+      - name: Upload para R2 via Wrangler
         id: upload
         if: steps.dump.outputs.ok == 'true'
         continue-on-error: true
         env:
-          CF_R2_ACCOUNT_ID: ${{ secrets.CF_R2_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.LEILOAI_CF_ACCOUNT }}
           CF_R2_BUCKET: ${{ secrets.CF_R2_BUCKET }}
           ARQUIVO: ${{ steps.dump.outputs.arquivo }}
         run: |
           set -e
-          if [ -z "${CF_R2_ACCOUNT_ID:-}" ] || [ -z "${CF_R2_BUCKET:-}" ]; then
+          BUCKET="${CF_R2_BUCKET:-leiloai-backups}"
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "erro=R2 secrets ausentes" >> "$GITHUB_OUTPUT"
+            echo "erro=Cloudflare secrets ausentes" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          ENDPOINT="https://${CF_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          if aws s3 cp "$ARQUIVO" "s3://${CF_R2_BUCKET}/postgres/${ARQUIVO}" \
-               --endpoint-url "$ENDPOINT"; then
+          npm install -g wrangler@latest
+          if wrangler r2 object put "${BUCKET}/postgres/${ARQUIVO}" --file "${ARQUIVO}" --remote; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "erro=upload R2 falhou" >> "$GITHUB_OUTPUT"
+            echo "erro=upload R2 falhou (wrangler)" >> "$GITHUB_OUTPUT"
           fi
           exit 0
 
