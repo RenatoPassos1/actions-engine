@@ -1,33 +1,45 @@
-# LeilôAI: Blog News Cron (gerador diario de 1 noticia com IA)
+# LeilôAI: Blog News Cron (gerador de noticias com IA)
 #
-# Busca feeds RSS publicos confiaveis (Conjur, Migalhas, CNJ, G1 Economia,
-# InfoMoney, Agencia Brasil), filtra por keywords do nicho de leiloes,
-# escolhe o item mais recente ainda nao publicado e pede ao DeepSeek um
-# artigo original em pt-BR (700 a 900 palavras, zero travessoes, 2+
-# links internos, keywords trend naturais). Salva em conteudo_editorial
-# tipo=blog e submete a URL nova pro IndexNow (Bing/Yandex).
+# 2 runs/dia pra maximizar cobertura SERP:
+#  - 11:00 UTC (08:00 BRT): formato "news" (reativo, gancho RSS noticioso)
+#  - 17:00 UTC (14:00 BRT): formato rotacionado (howto/alerta), menos
+#    dependente de noticiario diario, mais perene.
 #
-# Agenda: 1 run/dia as 12:00 UTC (09:00 BRT). Dedup por source_url
-# garante que se rodarmos mais vezes por dia, nao gera duplicata.
+# Cada run puxa feeds RSS curados (Conjur, Migalhas, CNJ, STJ, G1, Valor,
+# InfoMoney, Exame, Agencia Brasil, Poder360), filtra por 50+ keywords
+# do nicho (leilao, inadimplencia, arrematacao, retomada, Lei 14.711),
+# deduplica por source_url e pede ao DeepSeek um artigo com:
+#  - Cadeia causal obrigatoria (fato -> leilao -> LeiloAI)
+#  - Rotacao UF (long-tail geografico)
+#  - FAQ embutida (3 a 5 perguntas, rich snippet)
+#  - NewsArticle schema (elegibilidade Google Top Stories)
+#  - 4+ links internos + mencao LeiloAI + /cadastro
 #
-# Manual: Actions > "LeilôAI: Blog News Cron" > Run workflow.
+# Dedup por source_url garante que se rodar mais vezes, nao duplica.
+# Workflow_dispatch tem input "formato" pra forcar formato especifico.
 #
-# Setup pre-requisito:
-# 1. Neste repo (actions-engine): Settings > Secrets and variables > Actions
-#    LEILOAI_CRON_SECRET = mesmo valor do Vercel env var CRON_SECRET
-#    (Opcional) LEILOAI_APP_URL = URL base (default: https://leiloai.com)
+# Setup:
+#  LEILOAI_CRON_SECRET  = mesmo valor do Vercel env var CRON_SECRET
+#  LEILOAI_APP_URL (opcional) = default https://leiloai.com
 
 name: "LeilôAI: Blog News Cron"
 
 on:
   schedule:
-    - cron: "0 12 * * *" # 09:00 BRT (1x por dia)
+    - cron: "0 11 * * *" # 08:00 BRT, formato news
+    - cron: "0 17 * * *" # 14:00 BRT, formato howto/alerta
   workflow_dispatch:
     inputs:
-      reason:
-        description: "Motivo do disparo manual"
+      formato:
+        description: "Formato do post"
         required: false
-        default: "Manual trigger"
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - news
+          - howto
+          - alerta
 
 concurrency:
   group: leiloai-news-cron
@@ -39,35 +51,65 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Trigger news-generator endpoint
+      - name: Decidir formato por horario
+        id: fmt
+        env:
+          INPUT_FORMATO: ${{ github.event.inputs.formato }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          # Se for dispatch manual com formato explicito, usa ele
+          if [ -n "${INPUT_FORMATO:-}" ] && [ "${INPUT_FORMATO}" != "auto" ]; then
+            echo "formato=${INPUT_FORMATO}" >> "$GITHUB_OUTPUT"
+          # Se for schedule de 11h UTC (08h BRT) -> news
+          elif [ "${SCHEDULE_CRON:-}" = "0 11 * * *" ]; then
+            echo "formato=news" >> "$GITHUB_OUTPUT"
+          # Se for schedule de 17h UTC (14h BRT) -> alterna howto/alerta por dia
+          elif [ "${SCHEDULE_CRON:-}" = "0 17 * * *" ]; then
+            DOW=$(date -u +%u)
+            # Seg/Qua/Sex = howto, Ter/Qui/Sab/Dom = alerta
+            if [ "$DOW" = "1" ] || [ "$DOW" = "3" ] || [ "$DOW" = "5" ]; then
+              echo "formato=howto" >> "$GITHUB_OUTPUT"
+            else
+              echo "formato=alerta" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "formato=auto" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger news-generator
         id: trigger
         env:
           CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
           BASE_URL: ${{ vars.LEILOAI_APP_URL || 'https://leiloai.com' }}
+          FORMATO: ${{ steps.fmt.outputs.formato }}
         run: |
           set -euo pipefail
           if [ -z "${CRON_SECRET}" ]; then
-            echo "::error::LEILOAI_CRON_SECRET not configured in repo secrets"
+            echo "::error::LEILOAI_CRON_SECRET not configured"
             exit 1
           fi
-          echo "Triggering ${BASE_URL}/api/cron/news-generator"
+          URL="${BASE_URL}/api/cron/news-generator"
+          if [ -n "${FORMATO:-}" ] && [ "${FORMATO}" != "auto" ]; then
+            URL="${URL}?formato=${FORMATO}"
+          fi
+          echo "Triggering ${URL}"
           RESPONSE_FILE=$(mktemp)
           HTTP_CODE=$(curl -sS -o "${RESPONSE_FILE}" -w "%{http_code}" \
             --max-time 90 \
             -X POST \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             -H "Content-Type: application/json" \
-            "${BASE_URL}/api/cron/news-generator")
-          echo "HTTP status: ${HTTP_CODE}"
-          echo "--- Response body ---"
+            "${URL}")
+          echo "HTTP: ${HTTP_CODE}"
+          echo "--- Body ---"
           cat "${RESPONSE_FILE}"
           echo ""
-          echo "---------------------"
           echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
           SLUG=$(cat "${RESPONSE_FILE}" | grep -oE '"slug":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")
           echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
           if [ "${HTTP_CODE}" != "200" ]; then
-            echo "::error::News generator returned HTTP ${HTTP_CODE} (esperado 200)"
+            echo "::error::News generator returned HTTP ${HTTP_CODE}"
             exit 1
           fi
 
@@ -79,11 +121,13 @@ jobs:
           echo "## LeilôAI, Blog News Cron" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Formato:** \`${{ steps.fmt.outputs.formato }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **HTTP:** \`${{ steps.trigger.outputs.http_code }}\`" >> $GITHUB_STEP_SUMMARY
           if [ -n "${{ steps.trigger.outputs.slug }}" ]; then
-            echo "- **Slug publicado:** [\`${{ steps.trigger.outputs.slug }}\`](${BASE_URL}/blog/${{ steps.trigger.outputs.slug }})" >> $GITHUB_STEP_SUMMARY
+            echo "- **Publicado:** [\`${{ steps.trigger.outputs.slug }}\`](${BASE_URL}/blog/${{ steps.trigger.outputs.slug }})" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- **Slug publicado:** (nenhum, sem candidatos ou erro)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Publicado:** (nenhum, sem candidatos ou erro)" >> $GITHUB_STEP_SUMMARY
           fi
-          echo "- **Site:** https://leiloai.com/blog" >> $GITHUB_STEP_SUMMARY
+          echo "- **Blog:** https://leiloai.com/blog" >> $GITHUB_STEP_SUMMARY
+          echo "- **News sitemap:** https://leiloai.com/news-sitemap.xml" >> $GITHUB_STEP_SUMMARY
