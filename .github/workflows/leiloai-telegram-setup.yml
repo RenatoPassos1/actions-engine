@@ -1,0 +1,126 @@
+# LeilôAI: setup inicial do bot Telegram
+#
+# Disparado manualmente via workflow_dispatch. Executa 3 tarefas:
+#  1. Injeta TELEGRAM_BOT_TOKEN e TELEGRAM_WEBHOOK_SECRET nas env vars
+#     do projeto Vercel leiloai (production).
+#  2. Chama Vercel API pra disparar redeploy (pra as vars virarem disponiveis).
+#  3. Registra o webhook no Telegram (setWebhook) apontando pra
+#     https://leiloai.com/api/telegram/webhook com o secret.
+#
+# Idempotente: pode rodar mais de uma vez. Atualiza env var se ja existir.
+
+name: "LeilôAI: Telegram Setup"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-telegram-setup
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.LEILOAI_VERCEL_PROJECT_ID }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.LEILOAI_TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.LEILOAI_TELEGRAM_WEBHOOK_SECRET }}
+
+    steps:
+      - name: Sanity check secrets
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN}" ] || [ -z "${VERCEL_PROJECT_ID}" ]; then
+            echo "::error::VERCEL_TOKEN ou VERCEL_PROJECT_ID nao configurado"
+            exit 1
+          fi
+          if [ -z "${TELEGRAM_BOT_TOKEN}" ] || [ -z "${TELEGRAM_WEBHOOK_SECRET}" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN ou TELEGRAM_WEBHOOK_SECRET nao configurado"
+            exit 1
+          fi
+
+      - name: Setar/atualizar env vars no Vercel
+        run: |
+          set -euo pipefail
+          TEAM_PARAM=""
+          if [ -n "${VERCEL_ORG_ID:-}" ]; then
+            TEAM_PARAM="?teamId=${VERCEL_ORG_ID}"
+          fi
+
+          for VAR_NAME in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET; do
+            if [ "${VAR_NAME}" = "TELEGRAM_BOT_TOKEN" ]; then
+              VALUE="${TELEGRAM_BOT_TOKEN}"
+            else
+              VALUE="${TELEGRAM_WEBHOOK_SECRET}"
+            fi
+
+            # Tenta achar env var existente
+            EXISTING=$(curl -sS \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+              "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env${TEAM_PARAM}" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((e['id'] for e in d.get('envs',[]) if e['key']=='${VAR_NAME}'),''))" \
+              || echo "")
+
+            BODY=$(python3 -c "import json; print(json.dumps({'key':'${VAR_NAME}','value':'''${VALUE}''','type':'encrypted','target':['production','preview','development']}))")
+
+            if [ -n "${EXISTING}" ]; then
+              echo "Atualizando ${VAR_NAME} (id=${EXISTING})"
+              PATCH_BODY=$(python3 -c "import json; print(json.dumps({'value':'''${VALUE}''','type':'encrypted','target':['production','preview','development']}))")
+              curl -sS -X PATCH \
+                -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+                -H "content-type: application/json" \
+                "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env/${EXISTING}${TEAM_PARAM}" \
+                -d "${PATCH_BODY}" | head -c 200
+              echo
+            else
+              echo "Criando ${VAR_NAME}"
+              curl -sS -X POST \
+                -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+                -H "content-type: application/json" \
+                "https://api.vercel.com/v10/projects/${VERCEL_PROJECT_ID}/env${TEAM_PARAM}" \
+                -d "${BODY}" | head -c 200
+              echo
+            fi
+          done
+
+      - name: Disparar redeploy pra pegar env vars novas
+        run: |
+          set -euo pipefail
+          TEAM_PARAM=""
+          if [ -n "${VERCEL_ORG_ID:-}" ]; then
+            TEAM_PARAM="?teamId=${VERCEL_ORG_ID}"
+          fi
+          # Pega o ultimo deployment production READY e faz redeploy dele
+          LATEST=$(curl -sS \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            "https://api.vercel.com/v6/deployments${TEAM_PARAM}${TEAM_PARAM:+&}projectId=${VERCEL_PROJECT_ID}&target=production&state=READY&limit=1" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('deployments',[{}])[0].get('uid',''))")
+          if [ -z "${LATEST}" ]; then
+            echo "::warning::nenhum deployment READY encontrado pra redeploy; pule"
+            exit 0
+          fi
+          echo "Redeploy do ${LATEST}"
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "content-type: application/json" \
+            "https://api.vercel.com/v13/deployments${TEAM_PARAM}" \
+            -d "{\"name\":\"leiloai\",\"deploymentId\":\"${LATEST}\",\"target\":\"production\"}" | head -c 300
+          echo
+
+      - name: Registrar webhook no Telegram
+        run: |
+          set -euo pipefail
+          WEBHOOK_URL="https://leiloai.com/api/telegram/webhook"
+          echo "Registrando webhook: ${WEBHOOK_URL}"
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -H "content-type: application/json" \
+            -d "{\"url\":\"${WEBHOOK_URL}\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\",\"allowed_updates\":[\"message\",\"chat_join_request\",\"chat_member\"],\"drop_pending_updates\":true}" | python3 -m json.tool
+
+      - name: Verificar webhook
+        run: |
+          set -euo pipefail
+          curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" | python3 -m json.tool
