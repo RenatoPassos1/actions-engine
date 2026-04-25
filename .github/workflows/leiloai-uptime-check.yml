@@ -1,0 +1,95 @@
+# LeiloAI - Uptime Check: substitui UptimeRobot com GitHub Actions nativo.
+# Pinga URLs publicas criticas a cada 5 minutos.
+# Abre issue (label "incident") se qualquer endpoint cai por 2 checks consecutivos.
+#
+# Zero custo, zero token externo. Alternativa free-tier-safe a UptimeRobot.
+
+name: "LeiloAI: Uptime Check"
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # a cada 5 minutos (mesmo intervalo do UptimeRobot free)
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: leiloai-uptime-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { slug: home,        url: 'https://leiloai.com/',                    espera: '200' }
+          - { slug: painel,      url: 'https://leiloai.com/painel',              espera: '307' } # redirect /entrar
+          - { slug: sitemap,     url: 'https://leiloai.com/sitemap.xml',         espera: '200' }
+          - { slug: api-v1,      url: 'https://leiloai.com/api/v1',              espera: '200' }
+          - { slug: planos,      url: 'https://leiloai.com/planos',              espera: '200' }
+          - { slug: blog,        url: 'https://leiloai.com/blog',                espera: '200' }
+          - { slug: funcionalidades, url: 'https://leiloai.com/funcionalidades', espera: '200' }
+
+    steps:
+      - name: Pinga ${{ matrix.target.slug }}
+        id: ping
+        continue-on-error: true
+        run: |
+          set +e
+          CODE=$(curl -sS --max-time 15 -o /tmp/body.txt -w '%{http_code}' \
+            -A "LeiloAI-Uptime/1.0 (+https://leiloai.com)" \
+            "${{ matrix.target.url }}" || echo "000")
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          EXPECT="${{ matrix.target.espera }}"
+          if [ "$CODE" = "$EXPECT" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "OK [$CODE] ${{ matrix.target.url }}"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "FAIL [$CODE esperado $EXPECT] ${{ matrix.target.url }}"
+            head -c 200 /tmp/body.txt || true
+          fi
+
+      - name: Abre issue se caiu
+        if: steps.ping.outputs.ok != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dia = new Date().toISOString().slice(0, 10);
+            const slug = '${{ matrix.target.slug }}';
+            const url = '${{ matrix.target.url }}';
+            const code = '${{ steps.ping.outputs.code }}';
+            const esperado = '${{ matrix.target.espera }}';
+            const titulo = `[incident] uptime ${slug} fora ${dia}`;
+            const corpo = [
+              `URL ${url} respondeu HTTP ${code} (esperado ${esperado}).`,
+              ``,
+              `Detectado em: ${new Date().toISOString()}`,
+              `Workflow: leiloai-uptime-check`,
+              ``,
+              `Dedup: uma issue por dia por slug. Feche manualmente quando resolvido.`,
+            ].join('\n');
+
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'incident',
+              state: 'open',
+              per_page: 100,
+            });
+            if (existentes.find(i => i.title === titulo)) {
+              console.log('Issue do dia ja existe, ignorando dedup.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: titulo,
+              body: corpo,
+              labels: ['incident', 'leiloai-uptime'],
+            });
