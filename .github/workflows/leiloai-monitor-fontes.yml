@@ -15,8 +15,18 @@ name: "LeiloAI: Monitor Fontes P1/P2/P3"
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/15 * * * *' # P1+P2 a cada 15 minutos (rapido)
+    - cron: '0 5 * * *'    # P3 diario as 5h UTC (opt-in via ?p3=1, query 7d pesada)
   workflow_dispatch:
+    inputs:
+      incluir_p3:
+        description: 'Incluir checagem P3 (volume 7d)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   issues: write
@@ -44,10 +54,16 @@ jobs:
           CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
         run: |
           set -euo pipefail
-          CODE=$(curl -sS --max-time 90 -o /tmp/resp.json -w '%{http_code}' \
+          # P3 (volume 7d) só roda no cron das 5h UTC ou via dispatch manual.
+          P3_PARAM=""
+          if [ "${{ github.event.schedule }}" = "0 5 * * *" ] || [ "${{ github.event.inputs.incluir_p3 }}" = "true" ]; then
+            P3_PARAM="?p3=1"
+            echo "Modo P3 ativo (query 7d, pesada)"
+          fi
+          CODE=$(curl -sS --max-time 290 -o /tmp/resp.json -w '%{http_code}' \
             -X POST \
             -H "x-cron-secret: ${CRON_SECRET}" \
-            "https://leiloai.com/api/cron/monitorar-fontes" || echo "000")
+            "https://leiloai.com/api/cron/monitorar-fontes${P3_PARAM}" || echo "000")
           echo "http_code=$CODE" >> "$GITHUB_OUTPUT"
           echo "[$CODE] /api/cron/monitorar-fontes"
           head -c 1200 /tmp/resp.json || true
