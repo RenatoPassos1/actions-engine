@@ -1,0 +1,144 @@
+# LeilôAI — Lighthouse CI bloqueando merge
+#
+# Performance regression catch: sempre que um PR tocar em apps/web/**,
+# espera a Vercel gerar preview URL, roda Lighthouse em 3 rotas principais e
+# falha o build se Performance < 90, LCP > 2.5s ou CLS > 0.1.
+#
+# CONFIGURAÇÃO MANUAL NO GITHUB (uma única vez):
+#   Settings → Branches → branch protection rule em "main":
+#     → Required status checks: incluir "Lighthouse / lhci" como obrigatório
+#   Isso é manual porque o GitHub API de branch protection exige token com
+#   permissões admin no repo e sai de um reset-plumbing-change.
+#
+# Gatilho: pull_request no leilao-watch (via repository_dispatch tipo leiloai-pagespeed)
+# Secrets necessários:
+#   REPO_PAT            — PAT com acesso ao leilao-watch e Checks API
+#   VERCEL_TOKEN        — Vercel CLI token
+#   VERCEL_ORG_ID       — team_gdzcT5wqd4wpREVUBPN03nZX
+#   LEILOAI_VERCEL_PROJECT_ID — prj_yz7dn0NbeLAKRgAkp09nsTD8kRi1
+#
+# Para PRs:
+#   Use uma Actions no próprio leilao-watch que emita repository_dispatch
+#   com { preview_url, pr_number, commit_sha } depois que a Vercel publicar.
+
+name: "LeilôAI: Lighthouse"
+
+on:
+  repository_dispatch:
+    types: [leiloai-pagespeed]
+  workflow_dispatch:
+    inputs:
+      preview_url:
+        description: "URL do preview a auditar"
+        required: true
+        type: string
+
+concurrency:
+  group: leiloai-pagespeed-${{ github.event.client_payload.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lhci:
+    name: Lighthouse
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Define base URL
+        id: url
+        run: |
+          set -euo pipefail
+          URL="${{ github.event.client_payload.preview_url || github.event.inputs.preview_url }}"
+          if [ -z "$URL" ]; then
+            echo "::error::preview_url ausente, abortando"
+            exit 1
+          fi
+          # Remove trailing slash
+          URL="${URL%/}"
+          echo "base=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Alvo: ${URL}"
+
+      - name: Aguarda preview responder 200
+        env:
+          BASE: ${{ steps.url.outputs.base }}
+        run: |
+          set -u
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$BASE/") || code="000"
+            echo "tentativa $i: $code"
+            if [ "$code" = "200" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::preview não respondeu 200 em 5 minutos"
+          exit 1
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v12
+        with:
+          urls: |
+            ${{ steps.url.outputs.base }}/
+            ${{ steps.url.outputs.base }}/planos
+            ${{ steps.url.outputs.base }}/blog
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+          configPath: ""
+          # Thresholds bloqueantes: Performance >= 90, LCP <= 2.5s, CLS <= 0.1.
+          # Assertions inline porque não há .lighthouserc.json no repo — mantém
+          # a config no workflow pro alvo ficar explícito.
+          budgetPath: ""
+
+      - name: Avalia thresholds manualmente
+        if: always()
+        env:
+          BASE: ${{ steps.url.outputs.base }}
+        run: |
+          set -euo pipefail
+
+          # treosh/lighthouse-ci-action gera .lighthouseci/ com manifest e lhr-*.json
+          if [ ! -d ".lighthouseci" ]; then
+            echo "::error::sem resultados do Lighthouse"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import glob, json, os, sys
+
+          MIN_PERF = 0.90
+          MAX_LCP_MS = 2500
+          MAX_CLS = 0.10
+
+          falhas = []
+          for path in sorted(glob.glob(".lighthouseci/lhr-*.json")):
+              with open(path, "r", encoding="utf-8") as fh:
+                  lhr = json.load(fh)
+              url = lhr.get("finalUrl") or lhr.get("requestedUrl") or path
+              perf = (lhr.get("categories", {}).get("performance") or {}).get("score")
+              audits = lhr.get("audits", {})
+              lcp_ms = (audits.get("largest-contentful-paint") or {}).get("numericValue")
+              cls = (audits.get("cumulative-layout-shift") or {}).get("numericValue")
+
+              print(f"{url}: perf={perf} lcp_ms={lcp_ms} cls={cls}")
+
+              if perf is None or perf < MIN_PERF:
+                  falhas.append(f"{url}: performance {perf} < {MIN_PERF}")
+              if lcp_ms is None or lcp_ms > MAX_LCP_MS:
+                  falhas.append(f"{url}: LCP {lcp_ms}ms > {MAX_LCP_MS}ms")
+              if cls is None or cls > MAX_CLS:
+                  falhas.append(f"{url}: CLS {cls} > {MAX_CLS}")
+
+          if falhas:
+              for m in falhas:
+                  print(f"::error::{m}")
+              sys.exit(1)
+          print("Todos os thresholds passaram")
+          PY
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI — Lighthouse" >> $GITHUB_STEP_SUMMARY
+          echo "- Preview: ${{ steps.url.outputs.base }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Thresholds: Performance >= 90, LCP <= 2.5s, CLS <= 0.1" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

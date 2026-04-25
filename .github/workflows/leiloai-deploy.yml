@@ -116,6 +116,10 @@ jobs:
           - { dir: "services/ingestion/agregadores",  name: "agregadores" }
           - { dir: "services/ingestion/marketplaces", name: "marketplaces" }
           - { dir: "services/ingestion/rental",       name: "rental" }
+          - { dir: "services/ingestion/inss",         name: "inss" }
+          - { dir: "services/ingestion/seuimovelbb",  name: "seuimovelbb" }
+          - { dir: "services/ingestion/spyleiloes",   name: "spyleiloes" }
+          - { dir: "services/ingestion/querido-diario", name: "querido-diario" }
           - { dir: "services/enrichment",             name: "enrichment" }
           - { dir: "services/enrichment-ia",          name: "enrichment-ia" }
           - { dir: "services/rate-limit",             name: "rate-limit" }

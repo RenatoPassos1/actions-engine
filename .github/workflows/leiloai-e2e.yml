@@ -1,0 +1,85 @@
+# LeilôAI — E2E smoke tests (Playwright)
+#
+# Roda os 5 smoke tests do arquivo apps/web/e2e/smoke.spec.ts contra a URL
+# alvo (produção por default; preview URL via workflow_dispatch.base_url).
+#
+# Gatilhos:
+#   - push em main do leilao-watch (via repository_dispatch types: [leiloai-e2e])
+#   - manual via workflow_dispatch com base_url opcional
+#
+# Se qualquer smoke test falhar, o CI falha. Isso é o disjuntor de rollback:
+# deploy novo em produção que quebra /planos ou /api/v1 é detectado em minutos.
+#
+# Secrets necessários:
+#   REPO_PAT — PAT com acesso ao leilao-watch
+#
+# Artifact: playwright-report em HTML, disponível para 7 dias após execução.
+
+name: "LeilôAI: E2E"
+
+on:
+  repository_dispatch:
+    types: [leiloai-e2e]
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "URL alvo (default: https://leiloai.com)"
+        required: false
+        default: "https://leiloai.com"
+        type: string
+
+concurrency:
+  group: leiloai-e2e
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Playwright smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout leilao-watch
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/leilao-watch
+          token: ${{ secrets.REPO_PAT }}
+          ref: feat/landing
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install deps
+        working-directory: apps/web
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Playwright browsers
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Run smoke tests
+        working-directory: apps/web
+        env:
+          E2E_BASE_URL: ${{ github.event.inputs.base_url || 'https://leiloai.com' }}
+        run: npx playwright test --reporter=list,html
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI — E2E smoke" >> $GITHUB_STEP_SUMMARY
+          echo "- Data: $(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- Base URL: ${{ github.event.inputs.base_url || 'https://leiloai.com' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

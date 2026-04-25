@@ -1,0 +1,36 @@
+# LeilôAI - Reativação 7 dias sem login (arch §22.3)
+#
+# Cron semanal (quarta 13h UTC = 10h BRT) que dispara emails pros users
+# que logaram pela última vez entre 7 e 14 dias atrás. Idempotente: só
+# envia pra quem não recebeu reativação nos últimos 30 dias.
+#
+# Auth via header x-cron-secret = LEILOAI_CRON_SECRET.
+
+name: "LeilôAI: Reativação 7 dias sem login"
+
+on:
+  schedule:
+    - cron: '0 13 * * 3'
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-reativacao-7dias
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara cron de reativação
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "https://leiloai.com/api/cron/reativacao-7dias" \
+            --max-time 300 \
+            | tee /tmp/reativacao.json | head -c 800
+          echo

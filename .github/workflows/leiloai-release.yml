@@ -1,0 +1,174 @@
+# LeilôAI — Release GitHub + notificação Telegram
+#
+# Gatilhos:
+#   - repository_dispatch types: [leiloai-release]
+#       (emitido pelo leilao-watch quando push em main mexer em landing/CHANGELOG.md)
+#   - push de tag v* no próprio actions-engine (fallback manual)
+#   - workflow_dispatch (manual)
+#
+# O workflow:
+#   1. Clona leilao-watch (branch feat/landing)
+#   2. Lê landing/CHANGELOG.md e extrai a seção da versão mais recente
+#      (primeiro h2 que comece com "## [")
+#   3. Cria GitHub Release no leilao-watch com essas notas
+#   4. Posta resumo via Telegram bot do LeilôAI
+#
+# Secrets necessários neste repo:
+#   REPO_PAT                        — PAT com repo scope no leilao-watch
+#   LEILOAI_TELEGRAM_BOT_TOKEN      — bot do LeilôAI
+#   LEILOAI_TELEGRAM_CHAT_ID        — chat admin / canal de releases
+
+name: "LeilôAI: Release"
+
+on:
+  repository_dispatch:
+    types: [leiloai-release]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag semver a criar no leilao-watch (ex: v1.0.0). Se vazio, lê do CHANGELOG."
+        required: false
+        type: string
+
+concurrency:
+  group: leiloai-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Criar release + notificar
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout leilao-watch
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/leilao-watch
+          token: ${{ secrets.REPO_PAT }}
+          ref: feat/landing
+          fetch-depth: 1
+
+      - name: Extract version and notes from CHANGELOG
+        id: changelog
+        run: |
+          set -euo pipefail
+          FILE="landing/CHANGELOG.md"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::CHANGELOG não encontrado em $FILE"
+            exit 1
+          fi
+
+          # Acha primeiro h2 que comece com "## [x.y.z]"
+          FIRST=$(grep -nE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$FILE" | head -n 1 || true)
+          if [ -z "$FIRST" ]; then
+            echo "::error::Nenhuma seção ## [x.y.z] encontrada no CHANGELOG"
+            exit 1
+          fi
+          FIRST_LINE=$(echo "$FIRST" | cut -d: -f1)
+          TITLE=$(sed -n "${FIRST_LINE}p" "$FILE")
+          VERSION=$(echo "$TITLE" | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/')
+
+          # Acha próxima linha que começa com "## " (próxima seção ou EOF)
+          NEXT=$(awk -v start="$FIRST_LINE" 'NR > start && /^## / { print NR; exit }' "$FILE" || true)
+          if [ -z "$NEXT" ]; then
+            NEXT=$(wc -l < "$FILE")
+            NEXT=$((NEXT + 1))
+          fi
+
+          # Notas = da linha após o título até a linha antes do próximo título
+          START_NOTES=$((FIRST_LINE + 1))
+          END_NOTES=$((NEXT - 1))
+          NOTES=$(sed -n "${START_NOTES},${END_NOTES}p" "$FILE")
+
+          # Override via workflow_dispatch.inputs.tag
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            VERSION=$(echo "$INPUT_TAG" | sed 's/^v//')
+          fi
+
+          # push de tag já vem com GITHUB_REF=refs/tags/vX.Y.Z
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "notes<<LEILOAI_NOTES_EOF"
+            echo "$NOTES"
+            echo "LEILOAI_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Versão detectada: ${VERSION}"
+          echo "Tag: ${TAG}"
+
+      - name: Criar GitHub Release no leilao-watch
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+          TAG: ${{ steps.changelog.outputs.tag }}
+          VERSION: ${{ steps.changelog.outputs.version }}
+          NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          set -euo pipefail
+
+          # Garante gh disponível
+          gh --version
+
+          # Verifica se release já existe
+          if gh release view "$TAG" --repo RenatoPassos1/leilao-watch >/dev/null 2>&1; then
+            echo "Release $TAG já existe, atualizando notas"
+            echo "$NOTES" | gh release edit "$TAG" \
+              --repo RenatoPassos1/leilao-watch \
+              --notes-file -
+          else
+            echo "Criando release $TAG"
+            echo "$NOTES" | gh release create "$TAG" \
+              --repo RenatoPassos1/leilao-watch \
+              --title "LeilôAI $TAG" \
+              --target feat/landing \
+              --notes-file -
+          fi
+
+      - name: Notificar Telegram
+        if: always()
+        env:
+          BOT: ${{ secrets.LEILOAI_TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.LEILOAI_TELEGRAM_CHAT_ID }}
+          TAG: ${{ steps.changelog.outputs.tag }}
+          VERSION: ${{ steps.changelog.outputs.version }}
+          NOTES: ${{ steps.changelog.outputs.notes }}
+          STATUS: ${{ job.status }}
+        run: |
+          set -u
+          if [ -z "${BOT:-}" ] || [ -z "${CHAT:-}" ]; then
+            echo "Telegram secrets ausentes, pulando notificação"
+            exit 0
+          fi
+
+          # Pega só as primeiras 25 linhas pra caber no limite de 4096 chars do Telegram
+          RESUMO=$(echo "$NOTES" | head -n 25 | sed 's/^/    /')
+          ICON="OK"
+          if [ "$STATUS" != "success" ]; then ICON="FALHOU"; fi
+
+          MSG=$(printf "LeiloAI Release %s (%s)\n\nStatus: %s\nRepo: RenatoPassos1/leilao-watch\nDeploy: https://leiloai.com\n\n%s" \
+            "$TAG" "$(TZ=America/Sao_Paulo date +'%d/%m/%Y %H:%M BRT')" \
+            "$ICON" "$RESUMO")
+
+          curl -sS -X POST "https://api.telegram.org/bot${BOT}/sendMessage" \
+            -d chat_id="${CHAT}" \
+            -d parse_mode="" \
+            --data-urlencode "text=${MSG}" | head -c 400 || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI — Release" >> $GITHUB_STEP_SUMMARY
+          echo "- Versão: ${{ steps.changelog.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag: ${{ steps.changelog.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

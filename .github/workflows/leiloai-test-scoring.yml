@@ -1,0 +1,59 @@
+# LeilôAI — Testes das calculadoras de IA (vitest)
+#
+# Cobertura: aluguel, judicial, lance-justo e nota.
+# Roda quando qualquer calculadora ou o pacote @leiloai/scoring for alterado.
+#
+# Gatilho: repository_dispatch emitido pelo leilao-watch quando push em main
+# mexer em apps/web/src/lib/calculators/** ou packages/scoring/**.
+# Também via workflow_dispatch.
+#
+# Secrets necessários:
+#   REPO_PAT — PAT com acesso ao leilao-watch
+
+name: "LeilôAI: Test Scoring"
+
+on:
+  repository_dispatch:
+    types: [leiloai-test-scoring]
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-test-scoring-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vitest:
+    name: Vitest calculadoras
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout leilao-watch
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/leilao-watch
+          token: ${{ secrets.REPO_PAT }}
+          ref: feat/landing
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install deps
+        working-directory: apps/web
+        run: npm ci --no-audit --no-fund
+
+      - name: Rodar vitest nas calculadoras
+        working-directory: apps/web
+        run: npx vitest run src/lib/calculators --reporter=default
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### LeilôAI — Testes das calculadoras" >> $GITHUB_STEP_SUMMARY
+          echo "- Data: $(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

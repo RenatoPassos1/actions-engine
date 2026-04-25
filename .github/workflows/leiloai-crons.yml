@@ -16,14 +16,20 @@ on:
     - cron: '0 11 * * *'
     # enrichment: a cada 2h
     - cron: '0 */2 * * *'
-    # hard-delete LGPD: diário, 03h UTC (00h BRT)
+    # hard-delete LGPD + orchestrator_safety: diário, 03h UTC (00h BRT)
     - cron: '0 3 * * *'
-    # marketplaces: a cada 4h (ML API + scrapers OLX/ZAP/VivaReal)
+    # marketplaces: a cada 4h (ML API + scrapers OLX/ZAP/VivaReal + Webmotors/iCarros/FIPE)
     - cron: '15 */4 * * *'
-    # rental: 1x/dia 09h UTC (alugueis mudam lento)
+    # rental + querido-diario (diarios oficiais municipais): 1x/dia 09h UTC
     - cron: '0 9 * * *'
     # enrichment-ia: a cada 3h (extracao de editais via OpenAI)
     - cron: '20 */3 * * *'
+    # inss (editais de imoveis INSS): a cada 12h
+    - cron: '30 */12 * * *'
+    # seuimovelbb (scan IDs BB): a cada 6h
+    - cron: '40 */6 * * *'
+    # spyleiloes (sitemap UFs): a cada 6h
+    - cron: '50 */6 * * *'
   workflow_dispatch:
     inputs:
       job:
@@ -40,6 +46,10 @@ on:
           - rental
           - enrichment_ia
           - orchestrator
+          - inss
+          - seuimovelbb
+          - spyleiloes
+          - querido_diario
 
 concurrency:
   group: leiloai-crons-${{ github.event.schedule || github.event.inputs.job }}
@@ -164,8 +174,11 @@ jobs:
 
   orchestrator_safety:
     # Safety net: se algum cron acima falhar, orchestrator decide quais
-    # workers re-disparar com base na cadencia em jobs_log
+    # workers re-disparar com base na cadencia em jobs_log.
+    # Cron automatico diario 03h UTC (00h BRT) + dispatch manual.
     if: >-
+      github.event.schedule == '0 3 * * *' ||
+      github.event.inputs.job == 'all' ||
       github.event.inputs.job == 'orchestrator'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -177,6 +190,88 @@ jobs:
           set -euo pipefail
           curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
             "https://leiloai-orchestrator.renatopassos516.workers.dev/tick" \
+            | head -c 500
+          echo
+
+  inss:
+    if: >-
+      github.event.schedule == '30 */12 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'inss'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Dispara worker INSS (editais de imoveis)
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingestao-inss.renatopassos516.workers.dev/run" \
+            --max-time 600 \
+            | head -c 500
+          echo
+
+  seuimovelbb:
+    if: >-
+      github.event.schedule == '40 */6 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'seuimovelbb'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara worker seuimovelbb (scan IDs BB)
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingestao-seuimovelbb.renatopassos516.workers.dev/run" \
+            --max-time 600 \
+            | head -c 500
+          echo
+
+  spyleiloes:
+    if: >-
+      github.event.schedule == '50 */6 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'spyleiloes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        uf:
+          [ac, al, ap, am, ba, ce, df, es, go, ma, mg, ms, mt, pa, pb, pe,
+           pi, pr, rj, rn, ro, rr, rs, sc, se, sp, to]
+    steps:
+      - name: Dispara worker spyleiloes ${{ matrix.uf }}
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingestao-spyleiloes.renatopassos516.workers.dev/run?uf=${{ matrix.uf }}" \
+            --max-time 600 \
+            | head -c 500
+          echo
+
+  querido_diario:
+    if: >-
+      github.event.schedule == '0 9 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'querido_diario'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Dispara worker querido-diario (diarios oficiais municipais)
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
+            "https://leiloai-ingest-querido-diario.renatopassos516.workers.dev/run" \
+            --max-time 600 \
             | head -c 500
           echo
 
