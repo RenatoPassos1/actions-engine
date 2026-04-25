@@ -1,0 +1,63 @@
+# LeiloAI - OCR de editais (arch §11 e §10)
+#
+# A cada 6 horas roda o pipeline /api/cron/extrair-editais:
+#  1. Busca ate 20 items com edital_pdf_url e sem edital_extraido.
+#  2. Baixa o PDF (max 20MB), tenta pdf-parse.
+#  3. Se der texto, manda pro LLM extrair campos estruturados
+#     (matricula, valores, datas, ocupacao, debitos, fiel_depositario).
+#  4. UPDATE idempotente em items.edital_extraido.
+#
+# Auth: header x-cron-secret = LEILOAI_CRON_SECRET.
+
+name: "LeiloAI: OCR Editais"
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Quantos itens processar nesta execucao (1-50)"
+        required: false
+        default: "20"
+
+concurrency:
+  group: leiloai-ocr-editais
+  cancel-in-progress: false
+
+jobs:
+  extrair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Chama /api/cron/extrair-editais
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+          LIMIT_INPUT: ${{ github.event.inputs.limit }}
+        run: |
+          set -euo pipefail
+          LIMIT="${LIMIT_INPUT:-20}"
+
+          # Valida LIMIT como inteiro entre 1 e 50
+          case "$LIMIT" in
+            ''|*[!0-9]*) LIMIT=20 ;;
+          esac
+          if [ "$LIMIT" -lt 1 ] || [ "$LIMIT" -gt 50 ]; then
+            LIMIT=20
+          fi
+
+          CODE=$(curl -sS --max-time 290 -o /tmp/resp.json -w '%{http_code}' \
+            -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "https://leiloai.com/api/cron/extrair-editais?limit=${LIMIT}" || echo "000")
+          echo "[$CODE] /api/cron/extrair-editais?limit=${LIMIT}"
+          head -c 1500 /tmp/resp.json || true
+          echo
+
+          if [ "$CODE" != "200" ]; then
+            echo "Endpoint nao respondeu 200 (HTTP=$CODE). Job sobe failure."
+            exit 1
+          fi
+
+          # Log legivel
+          jq -r '. | "processados=\(.processados) sucesso=\(.sucesso) falha_download=\(.falha_download) falha_parse=\(.falha_parse) falha_llm=\(.falha_llm)"' /tmp/resp.json || true

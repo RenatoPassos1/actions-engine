@@ -1,0 +1,158 @@
+# LeiloAI - Monitoramento P1/P2/P3 de fontes (arch §23.2)
+#
+# A cada 15 minutos varre public.sources via /api/cron/monitorar-fontes
+# e classifica sinais:
+#  - P1: fonte crítica (caixa, detran-sp, detran-rj, dou, datajud) caída
+#  - P2: secundária com falhas consecutivas
+#  - P3: volume abaixo de 50% da mediana 7 dias
+#
+# Se a resposta trouxer P1 > 0, abre uma GitHub Issue com label
+# "incident" (dedup por dia) para acionar o Renato manualmente.
+#
+# Auth do endpoint: header x-cron-secret = LEILOAI_CRON_SECRET.
+
+name: "LeiloAI: Monitor Fontes P1/P2/P3"
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: leiloai-monitor-fontes
+  cancel-in-progress: false
+
+jobs:
+  monitorar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      p1: ${{ steps.chamada.outputs.p1 }}
+      p2: ${{ steps.chamada.outputs.p2 }}
+      p3: ${{ steps.chamada.outputs.p3 }}
+      healthy: ${{ steps.chamada.outputs.healthy }}
+      total: ${{ steps.chamada.outputs.total }}
+      http_code: ${{ steps.chamada.outputs.http_code }}
+    steps:
+      - name: Chama /api/cron/monitorar-fontes
+        id: chamada
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          CODE=$(curl -sS --max-time 90 -o /tmp/resp.json -w '%{http_code}' \
+            -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "https://leiloai.com/api/cron/monitorar-fontes" || echo "000")
+          echo "http_code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "[$CODE] /api/cron/monitorar-fontes"
+          head -c 1200 /tmp/resp.json || true
+          echo
+
+          if [ "$CODE" != "200" ]; then
+            echo "p1=-1" >> "$GITHUB_OUTPUT"
+            echo "p2=-1" >> "$GITHUB_OUTPUT"
+            echo "p3=-1" >> "$GITHUB_OUTPUT"
+            echo "healthy=-1" >> "$GITHUB_OUTPUT"
+            echo "total=-1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extrai contadores via jq (disponível nos runners ubuntu).
+          P1=$(jq -r '.P1 // 0' /tmp/resp.json)
+          P2=$(jq -r '.P2 // 0' /tmp/resp.json)
+          P3=$(jq -r '.P3 // 0' /tmp/resp.json)
+          HEALTHY=$(jq -r '.healthy // 0' /tmp/resp.json)
+          TOTAL=$(jq -r '.total // 0' /tmp/resp.json)
+          echo "p1=$P1" >> "$GITHUB_OUTPUT"
+          echo "p2=$P2" >> "$GITHUB_OUTPUT"
+          echo "p3=$P3" >> "$GITHUB_OUTPUT"
+          echo "healthy=$HEALTHY" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+      - name: Abre issue se P1 > 0
+        if: steps.chamada.outputs.p1 != '0' && steps.chamada.outputs.p1 != '-1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dia = new Date().toISOString().slice(0, 10);
+            const p1 = '${{ steps.chamada.outputs.p1 }}';
+            const p2 = '${{ steps.chamada.outputs.p2 }}';
+            const p3 = '${{ steps.chamada.outputs.p3 }}';
+            const healthy = '${{ steps.chamada.outputs.healthy }}';
+            const total = '${{ steps.chamada.outputs.total }}';
+            const titulo = `[incident] fontes P1 indisponiveis ${dia}`;
+            const corpo = [
+              `Resumo do monitoramento automatico de ${dia}:`,
+              ``,
+              `- P1 (critico): ${p1}`,
+              `- P2 (alto): ${p2}`,
+              `- P3 (anomalia volume): ${p3}`,
+              `- Healthy: ${healthy} / ${total}`,
+              ``,
+              `Veja public.app_events event=source_anomaly para detalhes.`,
+              `Detectado em: ${new Date().toISOString()}`,
+              `Workflow: leiloai-monitor-fontes`,
+            ].join('\n');
+
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'incident',
+              state: 'open',
+              per_page: 100,
+            });
+            if (existentes.find(i => i.title === titulo)) {
+              console.log('Issue do dia ja existe, ignorando para dedup.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: titulo,
+              body: corpo,
+              labels: ['incident', 'leiloai-monitor'],
+            });
+
+      - name: Abre issue se endpoint caiu (http_code != 200)
+        if: steps.chamada.outputs.http_code != '200'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dia = new Date().toISOString().slice(0, 10);
+            const code = '${{ steps.chamada.outputs.http_code }}';
+            const titulo = `[incident] monitor-fontes endpoint fora ${dia}`;
+            const corpo = [
+              `O endpoint /api/cron/monitorar-fontes respondeu com HTTP ${code}.`,
+              ``,
+              `Isso pode significar:`,
+              `- CRON_SECRET invalido no Vercel`,
+              `- Deploy quebrado`,
+              `- Supabase offline`,
+              ``,
+              `Detectado em: ${new Date().toISOString()}`,
+              `Workflow: leiloai-monitor-fontes`,
+            ].join('\n');
+
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'incident',
+              state: 'open',
+              per_page: 100,
+            });
+            if (existentes.find(i => i.title === titulo)) {
+              console.log('Issue do dia ja existe, ignorando dedup.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: titulo,
+              body: corpo,
+              labels: ['incident', 'leiloai-monitor'],
+            });

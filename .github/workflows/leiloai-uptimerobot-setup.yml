@@ -1,0 +1,52 @@
+# LeilôAI: setup/atualização dos monitores UptimeRobot
+#
+# Rodar manualmente via workflow_dispatch. Executa o script
+# apps/web/scripts/setup-uptimerobot.sh do repositório leilao-watch,
+# que cria (ou pula, se já existir) os 4 monitores:
+#   - https://leiloai.com                  ping 5min
+#   - https://leiloai.com/painel           ping 5min
+#   - https://leiloai.com/api/health       ping 5min
+#   - https://leiloai.com/sitemap.xml      keyword check 10min
+#
+# Idempotente. Pode rodar quantas vezes quiser para reconfigurar ou
+# adicionar novos monitores (edite o script e rode de novo).
+#
+# Requer secret: LEILOAI_UPTIMEROBOT_API_KEY (Main API Key).
+
+name: "LeilôAI: UptimeRobot Setup"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-uptimerobot-setup
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      UPTIMEROBOT_API_KEY: ${{ secrets.LEILOAI_UPTIMEROBOT_API_KEY }}
+
+    steps:
+      - name: Checkout leilao-watch
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/leilao-watch
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sanity check secret
+        run: |
+          set -euo pipefail
+          if [ -z "${UPTIMEROBOT_API_KEY}" ]; then
+            echo "::error::LEILOAI_UPTIMEROBOT_API_KEY nao configurado"
+            exit 1
+          fi
+
+      - name: Rodar setup-uptimerobot.sh
+        run: |
+          set -euo pipefail
+          chmod +x apps/web/scripts/setup-uptimerobot.sh
+          ./apps/web/scripts/setup-uptimerobot.sh
