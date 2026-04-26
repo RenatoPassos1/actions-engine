@@ -150,9 +150,15 @@ jobs:
         run: rm -f .env
 
   deploy:
-    name: Deploy to Hostinger
+    name: Deploy to Hostinger (DISABLED - site no Vercel)
     needs: generate
-    if: needs.generate.outputs.has_changes == 'true'
+    # Desabilitado em 2026-04-25 apos site migrar pro Vercel.
+    # O job 'generate' acima ja commita os artigos novos no repo
+    # satoshi-s-house, e o Vercel auto-deploya o satoshishouse-next/
+    # com o conteudo atualizado. Tentativas SSH/SFTP/FTP ao Hostinger
+    # estavam falhando por credenciais quebradas e travando o pipeline
+    # por 1h+ por run. Manter o job comentado pra historico/rollback.
+    if: false && needs.generate.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
