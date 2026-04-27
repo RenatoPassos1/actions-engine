@@ -1,0 +1,197 @@
+# UtilizAi - Deploy via Vercel CLI (workaround Hobby team policy)
+#
+# WHY: O team Vercel `mrwalkerbarbershop-8956s-projects` esta no plano Hobby.
+# Hobby exige que `commit author email` seja exatamente o owner do team
+# (ou estar associado via Login Connections do Vercel ao GitHub user dono
+# do repo). Quando essa cadeia quebra (ex: token GitHub OAuth expira no
+# Vercel), TODOS os pushes sao bloqueados com erro:
+#   "The Deployment was blocked because the commit author does not have
+#    contributing access to the project on Vercel."
+#
+# SOLUCAO: usar `vercel build --prod` + `vercel deploy --prebuilt --prod`
+# autenticados com VERCEL_TOKEN. Isso vira `source=cli` e bypassa
+# completamente a verificacao de commit author.
+#
+# Este workflow substitui o `utilizai-auto-deploy.yml` (que usava deploy
+# hook, ainda bloqueado pelo author check) e o `utilizai-deploy.yml`
+# (manual via deploy hook).
+#
+# Secrets necessarios (em RenatoPassos1/actions-engine > Settings > Secrets):
+# - UTILIZAI_VERCEL_TOKEN     -> token com escopo do team mrwalker (vcp_5n...)
+# - UTILIZAI_VERCEL_PROJECT_ID -> prj_fU27XMrFDHZdUhdXigPNj7vWot5m
+# - UTILIZAI_VERCEL_TEAM_ID    -> team_gdzcT5wqd4wpREVUBPN03nZX
+# - REPO_PAT                   -> PAT com read:repo no UtilizAi (privado)
+
+name: "UtilizAi: CLI Deploy (poll main SHA)"
+
+on:
+  schedule:
+    # A cada 5 min. So dispara deploy se SHA do main mudou desde ultima execucao.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Motivo do deploy manual"
+        required: false
+        default: "Manual deploy"
+      force:
+        description: "Forcar deploy mesmo se SHA nao mudou"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: utilizai-cli-deploy
+  cancel-in-progress: false
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.UTILIZAI_VERCEL_TEAM_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.UTILIZAI_VERCEL_PROJECT_ID }}
+
+jobs:
+  poll-and-deploy:
+    name: Poll main SHA and deploy via CLI if changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Get HEAD SHA of UtilizAi/main
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+        run: |
+          SHA=$(gh api repos/RenatoPassos1/UtilizAi/commits/main --jq '.sha')
+          if [ -z "$SHA" ]; then
+            echo "::error::Failed to fetch HEAD SHA"
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Current HEAD: $SHA"
+
+      - name: Restore last deployed SHA cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .last-deployed-sha
+          key: utilizai-cli-last-deployed-sha
+
+      - name: Compare SHAs
+        id: compare
+        run: |
+          CURRENT="${{ steps.sha.outputs.sha }}"
+          FORCE="${{ inputs.force }}"
+          if [ -f .last-deployed-sha ]; then
+            LAST=$(cat .last-deployed-sha)
+          else
+            LAST=""
+          fi
+          echo "Last deployed: ${LAST:-<none>}"
+          echo "Current HEAD:  $CURRENT"
+          echo "Force:         $FORCE"
+
+          if [ "$FORCE" = "true" ] || [ "$CURRENT" != "$LAST" ]; then
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            echo "Will deploy"
+          else
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "No change, skipping"
+          fi
+
+      - name: Checkout UtilizAi
+        if: steps.compare.outputs.should_deploy == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/UtilizAi
+          ref: main
+          token: ${{ secrets.REPO_PAT }}
+          fetch-depth: 1
+
+      - name: Setup Node
+        if: steps.compare.outputs.should_deploy == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Vercel CLI
+        if: steps.compare.outputs.should_deploy == 'true'
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel Environment Information
+        if: steps.compare.outputs.should_deploy == 'true'
+        run: |
+          vercel pull --yes --environment=production --token=${{ secrets.UTILIZAI_VERCEL_TOKEN }}
+
+      - name: Build Project Artifacts
+        if: steps.compare.outputs.should_deploy == 'true'
+        run: |
+          vercel build --prod --token=${{ secrets.UTILIZAI_VERCEL_TOKEN }}
+
+      - name: Deploy Project Artifacts to Vercel
+        if: steps.compare.outputs.should_deploy == 'true'
+        id: deploy
+        run: |
+          DEPLOYMENT_URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.UTILIZAI_VERCEL_TOKEN }})
+          echo "Deployment URL: $DEPLOYMENT_URL"
+          echo "url=$DEPLOYMENT_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for deployment READY
+        if: steps.compare.outputs.should_deploy == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.UTILIZAI_VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.UTILIZAI_VERCEL_TEAM_ID }}
+        run: |
+          PROJECT="${{ secrets.UTILIZAI_VERCEL_PROJECT_ID }}"
+          MAX_CHECKS=30
+          CHECK=0
+          STATE="QUEUED"
+
+          while [ "$CHECK" -lt "$MAX_CHECKS" ] && [ "$STATE" != "READY" ] && [ "$STATE" != "ERROR" ] && [ "$STATE" != "CANCELED" ]; do
+            CHECK=$((CHECK + 1))
+            sleep 20
+
+            RESPONSE=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v6/deployments?projectId=$PROJECT&teamId=$VERCEL_TEAM_ID&limit=1")
+
+            STATE=$(echo "$RESPONSE" | jq -r '.deployments[0].state // "UNKNOWN"')
+            URL=$(echo "$RESPONSE" | jq -r '.deployments[0].url // empty')
+            echo "[$CHECK/$MAX_CHECKS] State: $STATE - URL: $URL"
+          done
+
+          if [ "$STATE" = "ERROR" ] || [ "$STATE" = "CANCELED" ]; then
+            echo "::error::Deploy falhou com state=$STATE"
+            exit 1
+          fi
+
+      - name: Update last-deployed SHA file
+        if: steps.compare.outputs.should_deploy == 'true'
+        run: |
+          echo "${{ steps.sha.outputs.sha }}" > .last-deployed-sha
+
+      - name: Save last deployed SHA cache
+        if: steps.compare.outputs.should_deploy == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .last-deployed-sha
+          key: utilizai-cli-last-deployed-sha-${{ github.run_id }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## UtilizAi - CLI Deploy"
+            echo ""
+            echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')"
+            echo "- **HEAD main:** \`${{ steps.sha.outputs.sha }}\`"
+            echo "- **Deploy disparado?** ${{ steps.compare.outputs.should_deploy }}"
+            if [ "${{ steps.compare.outputs.should_deploy }}" = "true" ]; then
+              echo "- **Deploy URL:** ${{ steps.deploy.outputs.url }}"
+              echo "- **Site producao:** https://xn--utiliza-eza.com"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
