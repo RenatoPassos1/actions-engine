@@ -1,0 +1,39 @@
+# Deploy sh-translator Worker para conta cleo.pereira45 (Workers Paid)
+# Usa LEILOAI_CF_TOKEN/ACCOUNT (mesma conta) ja registrados como secrets.
+
+name: "Satoshi's House: Deploy CF Translator Worker"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout private repo (satoshi-s-house)
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/satoshi-s-house
+          token: ${{ secrets.REPO_PAT }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Wrangler
+        run: npm install -g wrangler@4.84.1
+
+      - name: Deploy Worker
+        working-directory: tools/cf-translator
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.LEILOAI_CF_ACCOUNT }}
+        run: |
+          wrangler deploy 2>&1 | tee deploy.log
+          echo "Worker URL extracted from log:"
+          grep -oE "https://[^[:space:]]+workers\.dev" deploy.log | head -1
