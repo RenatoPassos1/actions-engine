@@ -18,6 +18,7 @@ jobs:
         with:
           repository: RenatoPassos1/satoshi-s-house
           token: ${{ secrets.REPO_PAT }}
+          ref: migration/post-relink
           fetch-depth: 1
 
       - name: Setup Node.js
