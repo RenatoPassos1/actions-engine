@@ -110,7 +110,7 @@ jobs:
           node tools/run-pipeline.mjs \
             --news "$NEWS_COUNT" \
             --seo "$SEO_COUNT" \
-            --pillar "$PILLAR_COUNT"
+            --pillar "$PILLAR_COUNT" \n            --locales pt-BR,en,es
 
       # --- POST-GENERATION ---
       - name: Update crypto quotes
@@ -132,7 +132,7 @@ jobs:
             echo "article_count=0" >> $GITHUB_OUTPUT
           else
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            COUNT=$(git diff --staged --name-only | grep "public_html/noticias/.*index.html" | wc -l)
+            COUNT=$(git diff --staged --name-only | grep "satoshishouse-next/public/noticias/.*index.html" | wc -l)
             echo "article_count=${COUNT}" >> $GITHUB_OUTPUT
           fi
 
