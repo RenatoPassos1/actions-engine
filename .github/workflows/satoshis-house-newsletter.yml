@@ -1,5 +1,7 @@
-# Satoshi's House — Newsletter
-# Clona repo privado via PAT e envia newsletter
+# Satoshi's House - Newsletter (i18n: pt-BR + en + es)
+# Clona repo privado via PAT, envia 3 newsletters (uma por locale).
+# Cada locale tem subscribers, template e URL prefix proprios.
+# Atualizado 27/04/2026: roda send_newsletter.py 3x com LOCALE diferente.
 
 name: "Satoshi's House: Send Newsletter"
 
@@ -10,17 +12,26 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Modo teste (não envia emails de verdade)'
+        description: 'Modo teste (nao envia emails de verdade)'
         required: false
         default: 'false'
         type: choice
         options:
           - 'false'
           - 'true'
+      locales:
+        description: 'Locales separados por virgula (default: pt-BR,en,es)'
+        required: false
+        default: 'pt-BR,en,es'
+        type: string
+
+concurrency:
+  group: satoshis-house-newsletter
+  cancel-in-progress: false
 
 jobs:
   send-newsletter:
-    name: Enviar Newsletter
+    name: Enviar Newsletter (i18n)
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
@@ -38,43 +49,11 @@ jobs:
           cache: 'pip'
           cache-dependency-path: newsletter/requirements.txt
 
-      - name: Instalar dependências
+      - name: Install dependencies
         run: pip install -r newsletter/requirements.txt
 
-      - name: Dry-run — validar conteúdo
+      - name: Send Newsletter (loop pt-BR + en + es)
         working-directory: newsletter
-        run: python src/send_newsletter.py
-        env:
-          API_URL:    ${{ secrets.NL_API_URL }}
-          API_KEY:    ${{ secrets.NL_API_KEY }}
-          SMTP_HOST:  ${{ secrets.NL_SMTP_HOST }}
-          SMTP_PORT:  ${{ secrets.NL_SMTP_PORT }}
-          SMTP_USER:  ${{ secrets.NL_SMTP_USER }}
-          SMTP_PASS:  ${{ secrets.NL_SMTP_PASS }}
-          FROM_EMAIL: ${{ secrets.NL_FROM_EMAIL }}
-          FROM_NAME:  ${{ secrets.NL_FROM_NAME }}
-          SITE_URL:   ${{ secrets.NL_SITE_URL }}
-          SEND_DELAY: '2'
-          DRY_RUN:    'true'
-
-      - name: Enviar Newsletter (com retry)
-        working-directory: newsletter
-        run: |
-          MAX_ATTEMPTS=5
-          RETRY_DELAY=1800
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            echo "=== Tentativa $attempt de $MAX_ATTEMPTS ==="
-            if python src/send_newsletter.py; then
-              echo "Newsletter enviada com sucesso na tentativa $attempt"
-              exit 0
-            fi
-            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
-              echo "Falha na tentativa $attempt. Aguardando ${RETRY_DELAY}s antes de tentar novamente..."
-              sleep $RETRY_DELAY
-            fi
-          done
-          echo "Todas as $MAX_ATTEMPTS tentativas falharam."
-          exit 1
         env:
           API_URL:    ${{ secrets.NL_API_URL }}
           API_KEY:    ${{ secrets.NL_API_KEY }}
@@ -87,3 +66,35 @@ jobs:
           SITE_URL:   ${{ secrets.NL_SITE_URL }}
           SEND_DELAY: '2'
           DRY_RUN:    ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          LOCALES:    ${{ github.event_name == 'workflow_dispatch' && inputs.locales || 'pt-BR,en,es' }}
+        run: |
+          set +e
+          OVERALL_FAIL=0
+          IFS=',' read -ra LOC_ARR <<< "$LOCALES"
+          for LOC in "${LOC_ARR[@]}"; do
+            LOC=$(echo "$LOC" | xargs)
+            echo "=========================================="
+            echo "  Sending newsletter for locale: $LOC"
+            echo "=========================================="
+            ATTEMPTS=0
+            MAX=3
+            RETRY=900
+            while [ $ATTEMPTS -lt $MAX ]; do
+              ATTEMPTS=$((ATTEMPTS+1))
+              echo "--- $LOC attempt $ATTEMPTS/$MAX ---"
+              LOCALE="$LOC" python src/send_newsletter.py
+              CODE=$?
+              if [ $CODE -eq 0 ]; then
+                echo "$LOC OK on attempt $ATTEMPTS"
+                break
+              fi
+              if [ $ATTEMPTS -lt $MAX ]; then
+                echo "$LOC failed (exit $CODE). Sleeping ${RETRY}s..."
+                sleep $RETRY
+              else
+                echo "$LOC FAILED after $MAX attempts"
+                OVERALL_FAIL=1
+              fi
+            done
+          done
+          exit $OVERALL_FAIL
