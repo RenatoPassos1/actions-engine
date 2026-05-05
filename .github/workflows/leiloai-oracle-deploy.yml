@@ -80,9 +80,10 @@ jobs:
         run: |
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
             "$ORACLE_USER@$ORACLE_HOST" \
-            "cd /home/ubuntu/apps/leiloai && \
+            'cd /home/ubuntu/apps/leiloai && \
              git fetch origin && \
              git reset --hard origin/feat/landing && \
+             sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" apps/web/.env.production && \
              docker build -t leiloai-web:new . && \
              docker stop leiloai-web 2>/dev/null || true && \
              docker rm leiloai-web 2>/dev/null || true && \
@@ -92,7 +93,7 @@ jobs:
                -p 127.0.0.1:3010:3010 leiloai-web:latest && \
              sleep 8 && \
              docker logs leiloai-web 2>&1 | tail -20 && \
-             curl -fsS http://127.0.0.1:3010/ -o /dev/null -w 'OK %{http_code}\n'"
+             curl -fsS http://127.0.0.1:3010/ -o /dev/null -w "OK %{http_code}\n"'
 
       - name: Save deployed SHA
         if: steps.compare.outputs.skip == 'false'
