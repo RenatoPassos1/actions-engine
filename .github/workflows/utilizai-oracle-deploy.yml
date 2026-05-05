@@ -80,9 +80,10 @@ jobs:
         run: |
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
             "$ORACLE_USER@$ORACLE_HOST" \
-            "cd /home/ubuntu/apps/utilizai && \
+            'cd /home/ubuntu/apps/utilizai && \
              git fetch origin && \
              git reset --hard origin/main && \
+             sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" .env.production && \
              docker build -t utilizai-web:new . && \
              docker stop utilizai-web 2>/dev/null || true && \
              docker rm utilizai-web 2>/dev/null || true && \
@@ -92,7 +93,7 @@ jobs:
                -p 127.0.0.1:3011:3011 utilizai-web:latest && \
              sleep 8 && \
              docker logs utilizai-web 2>&1 | tail -20 && \
-             curl -fsS http://127.0.0.1:3011/ -o /dev/null -w 'OK %{http_code}\n'"
+             curl -fsS http://127.0.0.1:3011/ -o /dev/null -w "OK %{http_code}\n"'
 
       - name: Save deployed SHA
         if: steps.compare.outputs.skip == 'false'
