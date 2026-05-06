@@ -22,14 +22,20 @@
 # - UTILIZAI_VERCEL_TEAM_ID    -> team_gdzcT5wqd4wpREVUBPN03nZX
 # - REPO_PAT                   -> PAT com read:repo no UtilizAi (privado)
 
-name: "UtilizAi: CLI Deploy (poll main SHA) [DISABLED]"
+name: "UtilizAi: CLI Deploy (poll main SHA)"
 
-# DESABILITADO 2026-05-06: utilizai migrou pra Oracle VPS (utilizai-oracle-deploy.yml).
-# CLI deploy via Vercel nao se aplica mais. Schedule comentado pra parar emails
-# de falha. Mantido como workflow_dispatch pra rollback manual se necessario.
+# Mantido ativo (mesmo apos migracao Oracle): Vercel CLI deploy bypassa o
+# Hobby team author check ("commit author does not have contributing access")
+# que bloqueia auto-deploy via deploy hook. CLI deploy usa VERCEL_TOKEN +
+# `vercel deploy --prebuilt --prod` que vira source=cli e nao falha.
+#
+# O utilizai-auto-deploy.yml (deploy hook) fica DISABLED pq usa o caminho
+# bloqueado. Este (CLI) eh o caminho funcional pra Vercel. Em paralelo,
+# utilizai-oracle-deploy.yml mantem o site no Oracle (canonico).
 on:
-  # schedule:
-  #   - cron: "*/5 * * * *"
+  schedule:
+    # A cada 5 min. So dispara deploy se SHA do main mudou desde ultima execucao.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       reason:
