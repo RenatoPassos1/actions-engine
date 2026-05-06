@@ -22,20 +22,19 @@
 # - UTILIZAI_VERCEL_TEAM_ID    -> team_gdzcT5wqd4wpREVUBPN03nZX
 # - REPO_PAT                   -> PAT com read:repo no UtilizAi (privado)
 
-name: "UtilizAi: CLI Deploy (poll main SHA)"
+name: "UtilizAi: CLI Deploy (poll main SHA) [DISABLED]"
 
-# Mantido ativo (mesmo apos migracao Oracle): Vercel CLI deploy bypassa o
-# Hobby team author check ("commit author does not have contributing access")
-# que bloqueia auto-deploy via deploy hook. CLI deploy usa VERCEL_TOKEN +
-# `vercel deploy --prebuilt --prod` que vira source=cli e nao falha.
+# DESABILITADO 2026-05-06: Git auto-deploy do Vercel voltou a funcionar
+# apos user reconectar GitHub OAuth no Vercel (Login Connections). CLI
+# deploy era workaround pro Hobby author check; nao mais necessario.
+# Adicional: CLI nao respeita .vercelignore corretamente em alguns
+# patterns, falhava com "files > 15000".
 #
-# O utilizai-auto-deploy.yml (deploy hook) fica DISABLED pq usa o caminho
-# bloqueado. Este (CLI) eh o caminho funcional pra Vercel. Em paralelo,
-# utilizai-oracle-deploy.yml mantem o site no Oracle (canonico).
+# Mantido como workflow_dispatch pra deploy manual emergencial.
+# Em paralelo, utilizai-oracle-deploy.yml mantem o site no Oracle.
 on:
-  schedule:
-    # A cada 5 min. So dispara deploy se SHA do main mudou desde ultima execucao.
-    - cron: "*/5 * * * *"
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       reason:
