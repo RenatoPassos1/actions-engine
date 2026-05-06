@@ -194,10 +194,10 @@ jobs:
           echo
 
   inss:
-    if: >-
-      github.event.schedule == '30 */12 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'inss'
+    # DESABILITADO 2026-05-06: worker leiloai-ingestao-inss retorna 404
+    # (worker deletado ou nao deployado mais). Cron 1x/dia falhando.
+    # Re-habilitar quando worker for recriado.
+    if: false  # github.event.inputs.job == 'inss' (manual override removido)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
