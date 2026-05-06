@@ -22,12 +22,14 @@
 # - UTILIZAI_VERCEL_TEAM_ID    -> team_gdzcT5wqd4wpREVUBPN03nZX
 # - REPO_PAT                   -> PAT com read:repo no UtilizAi (privado)
 
-name: "UtilizAi: CLI Deploy (poll main SHA)"
+name: "UtilizAi: CLI Deploy (poll main SHA) [DISABLED]"
 
+# DESABILITADO 2026-05-06: utilizai migrou pra Oracle VPS (utilizai-oracle-deploy.yml).
+# CLI deploy via Vercel nao se aplica mais. Schedule comentado pra parar emails
+# de falha. Mantido como workflow_dispatch pra rollback manual se necessario.
 on:
-  schedule:
-    # A cada 5 min. So dispara deploy se SHA do main mudou desde ultima execucao.
-    - cron: "*/5 * * * *"
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       reason:

@@ -85,6 +85,8 @@ jobs:
              git reset --hard origin/main && \
              sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" .env.production && \
              python3 -c "import sys; p=sys.argv[1]; d=open(p,\"rb\").read(); n=d.count(bytes([0x5C,0x6E,0x0A])); d=d.replace(bytes([0x5C,0x6E,0x0A]),bytes([0x0A])); open(p,\"wb\").write(d); print(f\"strip backslash-n literal: {n}\")" .env.production && \
+             docker builder prune -af --filter "until=72h" 2>&1 | tail -3 && \
+             docker image prune -af --filter "until=72h" 2>&1 | tail -3 && \
              docker build -t utilizai-web:new . && \
              docker stop utilizai-web 2>/dev/null || true && \
              docker rm utilizai-web 2>/dev/null || true && \
@@ -94,7 +96,8 @@ jobs:
                -p 127.0.0.1:3011:3011 utilizai-web:latest && \
              sleep 8 && \
              docker logs utilizai-web 2>&1 | tail -20 && \
-             curl -fsS http://127.0.0.1:3011/ -o /dev/null -w "OK %{http_code}\n"'
+             curl -fsS http://127.0.0.1:3011/ -o /dev/null -w "OK %{http_code}\n" && \
+             df -h / | tail -1'
 
       - name: Save deployed SHA
         if: steps.compare.outputs.skip == 'false'
