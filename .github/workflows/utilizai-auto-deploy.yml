@@ -10,13 +10,14 @@
 # - Secret UTILIZAI_VERCEL_DEPLOY_HOOK no actions-engine = Deploy Hook URL do Vercel
 # - Secret REPO_PAT no actions-engine = PAT com read:repo no UtilizAi (repo privado)
 
-name: "UtilizAí: Auto Deploy (poll main SHA)"
+name: "UtilizAí: Auto Deploy (poll main SHA) [DISABLED]"
 
+# DESABILITADO 2026-05-06: utilizai migrou pra Oracle VPS (utilizai-oracle-deploy.yml).
+# Vercel auto-deploy nao se aplica mais. Schedule comentado pra parar emails de
+# falha. Mantido como workflow_dispatch pra rollback manual se necessario.
 on:
-  schedule:
-    # A cada 5 min. Mín Vercel Hobby = 100 builds/mês = limite é ~1 deploy a cada 7h
-    # mas só dispara quando SHA muda, então 5min de polling é seguro.
-    - cron: "*/5 * * * *"
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
