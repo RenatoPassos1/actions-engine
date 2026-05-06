@@ -1,0 +1,49 @@
+# LeilôAI: IndexNow ping horário
+#
+# Pinga o endpoint /api/cron/indexnow do leiloai a cada hora pra:
+#   - Submeter URLs novas (items, cidades, editorial) ao IndexNow protocol
+#   - Bing/Yandex/Seznam re-crawlam mais agressivamente
+#   - GSC indireto pq Google nao usa IndexNow mas observa esses sinais
+#
+# Secrets:
+#   LEILOAI_CRON_SECRET — header Authorization: Bearer <secret>
+
+name: "LeilôAI: IndexNow Hourly"
+
+on:
+  schedule:
+    # toda hora cheia
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-indexnow-hourly
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: POST /api/cron/indexnow
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Disparar IndexNow
+        env:
+          CRON_SECRET: ${{ secrets.LEILOAI_CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::LEILOAI_CRON_SECRET nao configurado"
+            exit 1
+          fi
+          RESP=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "content-type: application/json" \
+            "https://leiloai.com/api/cron/indexnow")
+          BODY=$(echo "$RESP" | head -n -1)
+          CODE=$(echo "$RESP" | tail -n 1)
+          echo "HTTP $CODE"
+          echo "$BODY" | head -c 500
+          if [ "$CODE" != "200" ] && [ "$CODE" != "502" ]; then
+            echo "::warning::IndexNow retornou status $CODE"
+            exit 1
+          fi
