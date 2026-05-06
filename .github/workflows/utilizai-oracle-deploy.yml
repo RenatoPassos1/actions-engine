@@ -84,6 +84,7 @@ jobs:
              git fetch origin && \
              git reset --hard origin/main && \
              sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" .env.production && \
+             python3 -c "import sys; p=sys.argv[1]; d=open(p,\"rb\").read(); n=d.count(bytes([0x5C,0x6E,0x0A])); d=d.replace(bytes([0x5C,0x6E,0x0A]),bytes([0x0A])); open(p,\"wb\").write(d); print(f\"strip backslash-n literal: {n}\")" .env.production && \
              docker build -t utilizai-web:new . && \
              docker stop utilizai-web 2>/dev/null || true && \
              docker rm utilizai-web 2>/dev/null || true && \
