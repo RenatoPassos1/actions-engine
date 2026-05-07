@@ -1,0 +1,68 @@
+# Richesse Club - Adiciona no-cache no styles.css + purge Cloudflare
+# Garante que browsers nao continuem servindo CSS antigo da edge cache.
+# Trigger manual.
+
+name: "Richesse Club: styles.css no-cache + CF purge"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Patch Caddyfile + reload
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          set -eu
+          CADDY=/etc/caddy/Caddyfile
+          BAK=/tmp/Caddyfile.bk-$(date +%s)
+          sudo cp $CADDY $BAK
+          # Verifica se ja tem o bloco
+          if sudo grep -q '@stylesCss path /styles.css' $CADDY; then
+            echo "stylesCss block ja existe"
+          else
+            # Insere logo apos @siteJs path /site.js
+            sudo python3 - "$CADDY" << 'PYEOF'
+          import sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          c = p.read_text(encoding='utf-8')
+          marker = '    @siteJs path /site.js\n'
+          add = ('    @stylesCss path /styles.css\n'
+                 '    header @stylesCss Cache-Control "no-cache, must-revalidate"\n')
+          if marker in c and add not in c:
+              c = c.replace(marker, marker + add, 1)
+              p.write_text(c, encoding='utf-8')
+              print('PYTHON: stylesCss block added')
+          else:
+              print('PYTHON: marker not found OR already added')
+          PYEOF
+            sudo caddy validate --config $CADDY || (echo 'INVALID, restoring' && sudo cp $BAK $CADDY && exit 1)
+            sudo systemctl reload caddy
+            sleep 2
+          fi
+          echo '=== Cache-Control servido para styles.css ==='
+          curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/styles.css | grep -i 'cache-control\|content-type'
+          REMOTE
+
+      - name: Cloudflare purge cache
+        env:
+          CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
+        run: |
+          ZONE="3aba7818769fce1223941e6d665dfb80"
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"purge_everything":true}' | python3 -c "import json,sys;d=json.load(sys.stdin);print('purge:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
