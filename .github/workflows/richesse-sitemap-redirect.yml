@@ -1,0 +1,82 @@
+# Richesse Club - Adiciona redirect 301 /sitemap -> /sitemap.xml no Caddyfile
+# Cobre o caso de URLs submetidas no GSC sem extensao .xml.
+# Trigger manual.
+
+name: "Richesse Club: redirect /sitemap -> /sitemap.xml"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Apply patch
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          set -eu
+          CADDY=/etc/caddy/Caddyfile
+          BAK=/tmp/Caddyfile.bk-$(date +%s)
+          sudo cp $CADDY $BAK
+
+          if sudo grep -q '# RICHESSE_SITEMAP_REDIRECT' $CADDY; then
+            echo "redirect ja aplicado"
+          else
+            sudo python3 - "$CADDY" << 'PYEOF'
+          import sys, pathlib, re
+          p = pathlib.Path(sys.argv[1])
+          c = p.read_text(encoding='utf-8')
+          # Adiciona redirect dentro do bloco https richesseclub.com
+          # Procura linha redir /og-image.jpg ... e injeta antes
+          marker = '    redir /og-image.jpg https://res.cloudinary.com'
+          add = ('    # RICHESSE_SITEMAP_REDIRECT\n'
+                 '    redir /sitemap /sitemap.xml 301\n'
+                 '    redir /sitemap/ /sitemap.xml 301\n'
+                 '    redir /robots /robots.txt 301\n')
+          # Injeta apenas no bloco HTTPS (o que tem CSP). Encontra primeira ocorrencia DEPOIS de "richesseclub.com, www.richesseclub.com {"
+          https_block_start = c.find('richesseclub.com, www.richesseclub.com {')
+          if https_block_start == -1:
+              print('PYTHON: HTTPS block not found')
+              sys.exit(1)
+          # Encontra o marker DEPOIS desse ponto
+          target_pos = c.find(marker, https_block_start)
+          if target_pos == -1:
+              print('PYTHON: og-image marker not found in HTTPS block')
+              sys.exit(1)
+          new_c = c[:target_pos] + add + c[target_pos:]
+          p.write_text(new_c, encoding='utf-8')
+          print('PYTHON: redirect added')
+          PYEOF
+            sudo caddy validate --config $CADDY || (echo 'INVALID, restoring' && sudo cp $BAK $CADDY && exit 1)
+            sudo systemctl reload caddy
+            sleep 2
+          fi
+
+          echo '=== test redirect ==='
+          curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/sitemap | head -5
+          echo ''
+          echo '=== sitemap.xml ainda ok ==='
+          curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/sitemap.xml | grep -i 'content-type\|HTTP'
+          REMOTE
+
+      - name: Cloudflare purge
+        env:
+          CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
+        run: |
+          ZONE="3aba7818769fce1223941e6d665dfb80"
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"files":["https://richesseclub.com/sitemap","https://richesseclub.com/sitemap.xml","https://richesseclub.com/robots","https://richesseclub.com/robots.txt"]}' | python3 -c "import json,sys;d=json.load(sys.stdin);print('purge:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
