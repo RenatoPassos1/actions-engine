@@ -1,7 +1,7 @@
 # Richesse Club - Deploy automatico para Oracle VPS
 # Site estatico: 77 HTMLs + site.js + styles.css + sitemap/robots/llms.
 # Polla HEAD do branch main do richesse-club a cada 5 min.
-# Se SHA mudou: ssh para Oracle, git pull em /opt/richesse-club, rsync para /var/www/richesseclub.
+# Se SHA mudou: ssh para Oracle, clone-or-pull em /home/ubuntu/apps/richesse-club, rsync para /var/www/richesseclub.
 #
 # Pre-requisitos (secrets em actions-engine):
 #   ORACLE_SSH_KEY - chave privada SSH (openclaw_do) base64 encoded
@@ -72,58 +72,66 @@ jobs:
           chmod 600 ~/.ssh/oracle_key
           ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy to Oracle (rsync HTMLs + site.js + styles.css)
+      - name: Deploy to Oracle (clone-or-pull, rsync HTMLs + site.js + styles.css)
         if: steps.compare.outputs.skip == 'false'
         env:
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          REPO_PAT: ${{ secrets.REPO_PAT }}
         run: |
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
             "$ORACLE_USER@$ORACLE_HOST" \
-            'set -euo pipefail
-             cd /opt/richesse-club
-             git fetch origin main
-             git reset --hard origin/main
-             HEAD_SHORT=$(git rev-parse --short HEAD)
-             echo "Pulled: $HEAD_SHORT"
+            "set -euo pipefail
+             REPO_DIR=/home/ubuntu/apps/richesse-club
+             mkdir -p /home/ubuntu/apps
+             if [ -d \"\$REPO_DIR/.git\" ]; then
+               cd \"\$REPO_DIR\"
+               git fetch origin main
+               git reset --hard origin/main
+             else
+               rm -rf \"\$REPO_DIR\"
+               git clone --depth=1 --branch=main \"https://x-access-token:$REPO_PAT@github.com/RenatoPassos1/richesse-club.git\" \"\$REPO_DIR\"
+               cd \"\$REPO_DIR\"
+             fi
+             HEAD_SHORT=\$(git rev-parse --short HEAD)
+             echo \"Pulled: \$HEAD_SHORT\"
+             sudo mkdir -p /var/www/richesseclub
              sudo rsync -a --delete \
-               --include="*.html" \
-               --include="site.js" \
-               --include="styles.css" \
-               --include="sitemap.xml" \
-               --include="robots.txt" \
-               --include="llms.txt" \
-               --include="manifest.webmanifest" \
-               --include="sw.js" \
-               --include="favicon.ico" \
-               --include="apple-touch-icon.png" \
-               --exclude=".git/" \
-               --exclude="node_modules/" \
-               --exclude="scrapers/" \
-               --exclude="api/" \
-               --exclude="worker/" \
-               --exclude="db/" \
-               --exclude="scripts/" \
-               --exclude=".github/" \
-               --exclude=".claude/" \
-               --exclude=".env*" \
-               --exclude="*.md" \
-               --exclude="*.py" \
-               --exclude="*.sh" \
-               --exclude="docker*" \
-               --exclude="package*.json" \
-               --exclude="tsconfig*" \
-               --exclude="pnpm-*" \
-               --exclude="*.txt.example" \
-               --exclude=".gitignore" \
-               --exclude=".gitattributes" \
-               /opt/richesse-club/ /var/www/richesseclub/
-             echo "--- /var/www/richesseclub/ post-deploy:"
-             ls -la /var/www/richesseclub/site.js /var/www/richesseclub/index.html | awk "{print \$5, \$9}"
-             echo "--- site.js head (build marker):"
-             grep -E "RICHESSE_BUILD" /var/www/richesseclub/site.js | head -1
-             echo "--- origin probe:"
-             curl -fsS -o /dev/null -w "site.js status: %{http_code}\n" http://127.0.0.1/site.js -H "Host: richesseclub.com" || true'
+               --include='*.html' \
+               --include='site.js' \
+               --include='styles.css' \
+               --include='sitemap.xml' \
+               --include='robots.txt' \
+               --include='llms.txt' \
+               --include='manifest.webmanifest' \
+               --include='sw.js' \
+               --exclude='.git/' \
+               --exclude='node_modules/' \
+               --exclude='scrapers/' \
+               --exclude='api/' \
+               --exclude='worker/' \
+               --exclude='db/' \
+               --exclude='scripts/' \
+               --exclude='.github/' \
+               --exclude='.claude/' \
+               --exclude='.env*' \
+               --exclude='*.md' \
+               --exclude='*.py' \
+               --exclude='*.sh' \
+               --exclude='docker*' \
+               --exclude='package*.json' \
+               --exclude='tsconfig*' \
+               --exclude='pnpm-*' \
+               --exclude='.gitignore' \
+               --exclude='.gitattributes' \
+               --exclude='caddy-*' \
+               \"\$REPO_DIR/\" /var/www/richesseclub/
+             echo '--- /var/www/richesseclub/ post-deploy:'
+             ls -la /var/www/richesseclub/site.js /var/www/richesseclub/index.html 2>/dev/null | awk '{print \$5, \$9}'
+             echo '--- site.js build marker:'
+             grep -E 'RICHESSE_BUILD' /var/www/richesseclub/site.js | head -1
+             echo '--- origin probe:'
+             curl -fsS -o /dev/null -w 'site.js status: %{http_code}\n' http://127.0.0.1/site.js -H 'Host: richesseclub.com' || true"
 
       - name: Save deployed SHA
         if: steps.compare.outputs.skip == 'false'
