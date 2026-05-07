@@ -1,4 +1,4 @@
-name: "Richesse Lote Route v2"
+name: "Richesse Lote Route v3"
 on:
   workflow_dispatch:
 jobs:
@@ -13,4 +13,4 @@ jobs:
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
-          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" "set -euo pipefail && sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.lote.\$(date +%s) && if grep -q loteDetalhe /etc/caddy/Caddyfile; then echo SKIP_ALREADY_EXISTS; else sudo sed -i '/^richesseclub.com, www.richesseclub.com {/,/root \* \/var\/www\/richesseclub/{/root \* \/var\/www\/richesseclub/a\\n    @loteDetalhe path_regexp ^/lote/[^/]+\$\n    rewrite @loteDetalhe /lote.html\n}' /etc/caddy/Caddyfile; fi && sudo /usr/bin/caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy && echo PROBE_LOTE_SLUG && curl -sI http://127.0.0.1/lote/caixa-test -H 'Host: richesseclub.com' | head -3 && echo PROBE_LOTE_HTML && curl -sI http://127.0.0.1/lote.html -H 'Host: richesseclub.com' | head -3"
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" 'set -euo pipefail && sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.lote3.$(date +%s) && if grep -q loteDetalhe /etc/caddy/Caddyfile; then echo SKIP_EXISTS; else sudo awk "/^@siteJs path \/site.js/ && !done {print; print \"\"; print \"    @loteDetalhe path_regexp ^/lote/[^/]+\$\"; print \"    rewrite @loteDetalhe /lote.html\"; done=1; next} {print}" /etc/caddy/Caddyfile | sudo tee /etc/caddy/Caddyfile.new > /dev/null && sudo mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile; fi && sudo grep -n loteDetalhe /etc/caddy/Caddyfile || echo no_match && sudo /usr/bin/caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy && echo PROBE && curl -sI http://127.0.0.1/lote/caixa-test -H "Host: richesseclub.com" | head -3'
