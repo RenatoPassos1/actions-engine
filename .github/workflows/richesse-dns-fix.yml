@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Apply DNS records
         env:
-          CF_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
+          CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
           TARGET_IP: ${{ github.event.inputs.target_ip }}
           ENABLE_PROXY: ${{ github.event.inputs.enable_proxy }}
         run: |
