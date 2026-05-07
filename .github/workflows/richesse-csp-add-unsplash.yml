@@ -1,0 +1,55 @@
+# Richesse Club - Adiciona images.unsplash.com de volta ao CSP img-src
+# Necessario porque a home (index.html e richesse-home.html) usa imagens curadas do Unsplash
+# como cards editoriais hardcoded. Os cards dinamicos do catalogo continuam filtrando Unsplash via JS.
+
+name: "Richesse Club: CSP add unsplash (home)"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Apply patch
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          set -eu
+          CADDY=/etc/caddy/Caddyfile
+          BAK=/tmp/Caddyfile.bk-$(date +%s)
+          sudo cp $CADDY $BAK
+
+          if sudo grep -q 'images.unsplash.com' $CADDY; then
+            echo "unsplash ja esta no CSP, nada a fazer"
+          else
+            # Adiciona https://images.unsplash.com depois de https://res.cloudinary.com (no img-src)
+            sudo sed -i 's|img-src '"'"'self'"'"' data: blob: https://res.cloudinary.com|img-src '"'"'self'"'"' data: blob: https://res.cloudinary.com https://images.unsplash.com|g' $CADDY
+            sudo caddy validate --config $CADDY || (echo 'INVALID, restoring' && sudo cp $BAK $CADDY && exit 1)
+            sudo systemctl reload caddy
+            sleep 2
+          fi
+          echo '=== CSP servido ==='
+          curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/ | grep -i 'content-security-policy' | head -1 | tr ' ' '\n' | grep -E 'img-src|unsplash|cloudinary' | head -5
+          REMOTE
+
+      - name: Cloudflare purge cache
+        env:
+          CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
+        run: |
+          ZONE="3aba7818769fce1223941e6d665dfb80"
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"purge_everything":true}' | python3 -c "import json,sys;d=json.load(sys.stdin);print('purge:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
