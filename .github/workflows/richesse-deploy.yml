@@ -1,7 +1,7 @@
 # Richesse Club - Deploy automatico para Oracle VPS
 # Site estatico: 77 HTMLs + site.js + styles.css + sitemap/robots/llms.
 # Polla HEAD do branch main do richesse-club a cada 5 min.
-# Se SHA mudou: ssh para Oracle, clone-or-pull em /home/ubuntu/apps/richesse-club, rsync para /var/www/richesseclub.
+# Se SHA mudou: ssh para Oracle, clone-or-pull em /home/ubuntu/apps/richesse-club, rsync para /opt/richesse-club/static.
 #
 # Pre-requisitos (secrets em actions-engine):
 #   ORACLE_SSH_KEY - chave privada SSH (openclaw_do) base64 encoded
@@ -95,7 +95,7 @@ jobs:
              fi
              HEAD_SHORT=\$(git rev-parse --short HEAD)
              echo \"Pulled: \$HEAD_SHORT\"
-             sudo mkdir -p /var/www/richesseclub
+             sudo mkdir -p /opt/richesse-club/static
              sudo rsync -a --delete \
                --include='*.html' \
                --include='site.js' \
@@ -125,11 +125,11 @@ jobs:
                --exclude='.gitignore' \
                --exclude='.gitattributes' \
                --exclude='caddy-*' \
-               \"\$REPO_DIR/\" /var/www/richesseclub/
-             echo '--- /var/www/richesseclub/ post-deploy:'
-             ls -la /var/www/richesseclub/site.js /var/www/richesseclub/index.html 2>/dev/null | awk '{print \$5, \$9}'
+               \"\$REPO_DIR/\" /opt/richesse-club/static/
+             echo '--- /opt/richesse-club/static/ post-deploy:'
+             ls -la /opt/richesse-club/static/site.js /opt/richesse-club/static/index.html 2>/dev/null | awk '{print \$5, \$9}'
              echo '--- site.js build marker:'
-             grep -E 'RICHESSE_BUILD' /var/www/richesseclub/site.js | head -1
+             grep -E 'RICHESSE_BUILD' /opt/richesse-club/static/site.js | head -1
              echo '--- origin probe:'
              curl -fsS -o /dev/null -w 'site.js status: %{http_code}\n' http://127.0.0.1/site.js -H 'Host: richesseclub.com' || true"
 
