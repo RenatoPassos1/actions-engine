@@ -1,10 +1,9 @@
-name: "Richesse: Add /lote/* route to Caddyfile"
+name: "Richesse Lote Route v2"
 on:
   workflow_dispatch:
 jobs:
   fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
       - run: |
           mkdir -p ~/.ssh
@@ -14,31 +13,4 @@ jobs:
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
-          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
-            "$ORACLE_USER@$ORACLE_HOST" \
-            "set -euo pipefail && \
-             sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.\$(date +%Y%m%d-%H%M%S) && \
-             sudo python3 -c \"
-import re
-with open('/etc/caddy/Caddyfile', 'r') as f: c = f.read()
-# Adiciona rewrite /lote/* -> /lote.html dentro do bloco richesseclub.com HTTPS
-# Procura linha 'try_files {path} {path}.html /index.html' ou similar
-if '@loteDetalhe' in c:
-    print('SKIP: ja existe @loteDetalhe')
-else:
-    # Insere ANTES do file_server no bloco richesseclub.com (sem http://)
-    pattern = r'(richesseclub.com, www.richesseclub.com \{[^}]*?root \* /var/www/richesseclub\s*)'
-    new_block = r'\1\n    @loteDetalhe path_regexp ^/lote/[^/]+\$\n    rewrite @loteDetalhe /lote.html\n'
-    new_c, n = re.subn(pattern, new_block, c, count=1)
-    if n == 0:
-        print('WARN: pattern nao encontrado, tentando alt')
-    else:
-        with open('/etc/caddy/Caddyfile', 'w') as f: f.write(new_c)
-        print(f'OK: inserido em {n} bloco(s)')
-\" && \
-             sudo /usr/bin/caddy validate --config /etc/caddy/Caddyfile && \
-             sudo systemctl reload caddy && \
-             echo '=== Probe /lote/test ===' && \
-             curl -sI http://127.0.0.1/lote/caixa-test-slug -H 'Host: richesseclub.com' | head -3 && \
-             echo '=== Probe /lote.html direct ===' && \
-             curl -sI http://127.0.0.1/lote.html -H 'Host: richesseclub.com' | head -3"
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" "set -euo pipefail && sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.lote.\$(date +%s) && if grep -q loteDetalhe /etc/caddy/Caddyfile; then echo SKIP_ALREADY_EXISTS; else sudo sed -i '/^richesseclub.com, www.richesseclub.com {/,/root \* \/var\/www\/richesseclub/{/root \* \/var\/www\/richesseclub/a\\n    @loteDetalhe path_regexp ^/lote/[^/]+\$\n    rewrite @loteDetalhe /lote.html\n}' /etc/caddy/Caddyfile; fi && sudo /usr/bin/caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy && echo PROBE_LOTE_SLUG && curl -sI http://127.0.0.1/lote/caixa-test -H 'Host: richesseclub.com' | head -3 && echo PROBE_LOTE_HTML && curl -sI http://127.0.0.1/lote.html -H 'Host: richesseclub.com' | head -3"
