@@ -1,0 +1,15 @@
+name: "Richesse: Show HTTPS block"
+on:
+  workflow_dispatch:
+jobs:
+  s:
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p ~/.ssh && echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key && chmod 600 ~/.ssh/oracle_key
+      - env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" \
+            "sudo awk '/^richesseclub.com, www.richesseclub.com {/,/^}/' /etc/caddy/Caddyfile"
