@@ -1,0 +1,27 @@
+name: "Richesse Club: No-Cache JS Headers"
+on:
+  workflow_dispatch:
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: mkdir -p ~/.ssh && echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key && chmod 600 ~/.ssh/oracle_key
+      - name: Update Caddyfile
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" \
+            "set -euo pipefail
+             sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.\$(date +%Y%m%d-%H%M%S)
+             # Forca site.js sempre revalidar com servidor (no-cache)
+             sudo sed -i 's|header @siteJs Cache-Control \"public, max-age=60, must-revalidate\"|header @siteJs Cache-Control \"no-cache, no-store, must-revalidate\"|g' /etc/caddy/Caddyfile
+             # Adiciona matcher pra sw.js também
+             # Mostra resultado
+             sudo grep -nE 'siteJs|sw.js|max-age|no-cache' /etc/caddy/Caddyfile | head -10
+             sudo caddy validate --config /etc/caddy/Caddyfile
+             sudo systemctl reload caddy
+             curl -sI http://127.0.0.1/site.js -H 'Host: richesseclub.com' | grep -iE 'cache-control|content-length'"
