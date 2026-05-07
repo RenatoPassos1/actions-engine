@@ -1,0 +1,44 @@
+# Richesse Club - Remove images.unsplash.com do CSP do Caddyfile (one-shot)
+# Faz sed in-place no /etc/caddy/Caddyfile do bloco richesseclub.com, valida com caddy fmt --diff e reload.
+# Trigger manual.
+
+name: "Richesse Club: CSP remove unsplash"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  csp-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Apply patch
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" \
+            "set -eu
+             CADDY=/etc/caddy/Caddyfile
+             echo '=== before ==='
+             sudo grep -n 'images.unsplash.com' \$CADDY || echo 'no unsplash refs'
+             sudo cp \$CADDY /tmp/Caddyfile.unsplash-backup.\$(date +%s)
+             # Remove ' https://images.unsplash.com' do CSP (com leading space pra nao deixar duplo espaco)
+             sudo sed -i 's| https://images.unsplash.com||g' \$CADDY
+             echo '=== after ==='
+             sudo grep -n 'images.unsplash.com' \$CADDY && echo 'STILL THERE' || echo 'removed OK'
+             # Valida sintaxe Caddy
+             sudo caddy validate --config \$CADDY || (echo 'INVALID, restoring' && sudo cp /tmp/Caddyfile.unsplash-backup.* \$CADDY && exit 1)
+             # Reload
+             sudo systemctl reload caddy
+             sleep 2
+             echo '=== CSP atual servido ==='
+             curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/ | grep -i content-security-policy | head -1"
