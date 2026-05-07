@@ -1,0 +1,50 @@
+# Richesse Club - Caddy Diagnostico
+# SSH na VM, exibe Caddyfile real, paths candidatos, processos caddy.
+
+name: "Richesse Club: Caddy Diagnose"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+
+      - name: Diagnose Caddy
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" \
+            "set -euo pipefail
+             echo '=== Caddy processes ==='
+             ps -ef | grep -i caddy | grep -v grep || true
+             echo '=== systemctl status caddy ==='
+             sudo systemctl status caddy --no-pager 2>&1 | head -10 || true
+             echo '=== which caddy ==='
+             which caddy || true
+             echo '=== /etc/caddy/Caddyfile (richesseclub.com block) ==='
+             sudo grep -A 10 'richesseclub.com' /etc/caddy/Caddyfile 2>/dev/null | head -30 || echo 'no Caddyfile in /etc/caddy/'
+             echo '=== Look for site.js files in common roots ==='
+             for p in /var/www/richesseclub /opt/richesse-club/static /home/ubuntu/apps/richesse-club /opt/richesse /var/www/html; do
+               if [ -f \"\$p/site.js\" ]; then
+                 SIZE=\$(wc -c < \"\$p/site.js\")
+                 BUILD=\$(grep -E 'RICHESSE_BUILD' \"\$p/site.js\" | head -1)
+                 echo \"FOUND \$p/site.js size=\$SIZE \$BUILD\"
+               fi
+             done
+             echo '=== Caddy admin api running configs ==='
+             curl -s http://localhost:2019/config/ 2>/dev/null | head -c 500 || echo 'no caddy admin api'
+             echo '=== docker ps caddy ==='
+             docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -i caddy || echo 'no caddy container'
+             echo '=== richesseclub.com root from origin ==='
+             curl -s -I http://127.0.0.1/site.js -H 'Host: richesseclub.com' | head -5"
