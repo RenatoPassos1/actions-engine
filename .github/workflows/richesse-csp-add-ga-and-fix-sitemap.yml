@@ -1,0 +1,90 @@
+# Richesse Club - Patch CSP pra liberar Google Analytics + remover reverse_proxy do sitemap.xml
+# Depois desse fix, /sitemap.xml e /robots.txt sao servidos estaticamente do /var/www/richesseclub/.
+# CSP libera googletagmanager.com (script-src) e google-analytics.com (connect-src + img-src).
+# Trigger manual.
+
+name: "Richesse Club: CSP add GA + Sitemap estatico"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Apply patch
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          set -eu
+          CADDY=/etc/caddy/Caddyfile
+          BAK=/tmp/Caddyfile.bk-$(date +%s)
+          sudo cp $CADDY $BAK
+          echo "backup: $BAK"
+
+          echo '=== before CSP grep ==='
+          sudo grep -n 'googletagmanager\|google-analytics' $CADDY || echo 'no GA refs'
+
+          # 1) Adiciona googletagmanager.com no script-src (depois do cdn.jsdelivr.net)
+          sudo sed -i 's|script-src '"'"'self'"'"' https://cdn.sentry-cdn.com https://esm.sh https://js.stripe.com https://cdn.jsdelivr.net|script-src '"'"'self'"'"' https://cdn.sentry-cdn.com https://esm.sh https://js.stripe.com https://cdn.jsdelivr.net https://www.googletagmanager.com|g' $CADDY
+
+          # 2) Adiciona googletagmanager.com no img-src (logo do GA pode usar imgs)
+          sudo sed -i 's|img-src '"'"'self'"'"' data: blob: https://res.cloudinary.com|img-src '"'"'self'"'"' data: blob: https://res.cloudinary.com https://www.google-analytics.com https://www.googletagmanager.com|g' $CADDY
+
+          # 3) Adiciona google-analytics.com + googletagmanager.com no connect-src
+          sudo sed -i 's|connect-src '"'"'self'"'"' https://api.richesseclub.com|connect-src '"'"'self'"'"' https://api.richesseclub.com https://www.google-analytics.com https://*.google-analytics.com https://www.googletagmanager.com https://*.analytics.google.com|g' $CADDY
+
+          echo '=== after CSP grep ==='
+          sudo grep -n 'google' $CADDY | head -10
+
+          # 4) Remove o bloco @dynamicSeo do reverse_proxy /sitemap.xml /robots.txt
+          # Usa Python pra ediçao multi-linha segura
+          sudo python3 - "$CADDY" << 'PYEOF'
+          import sys, re, pathlib
+          p = pathlib.Path(sys.argv[1])
+          original = p.read_text(encoding='utf-8')
+          # Pattern: matches "    # Sitemap...\n    @dynamicSeo path...\n    handle @dynamicSeo {\n        reverse_proxy 127.0.0.1:3020\n    }"
+          # Tolerante a whitespace e comments adjacentes
+          patt = re.compile(
+            r"(\n\s*#\s*Sitemap[^\n]*\n)?"
+            r"\s*@dynamicSeo\s+path\s+/sitemap\.xml\s+/robots\.txt\s*\n"
+            r"\s*handle\s+@dynamicSeo\s*\{\s*\n"
+            r"\s*reverse_proxy\s+127\.0\.0\.1:3020\s*\n"
+            r"\s*\}\s*\n",
+            re.MULTILINE
+          )
+          new = patt.sub("\n", original)
+          if new == original:
+              print("PYTHON: NO CHANGE on dynamicSeo (pattern not found)")
+          else:
+              p.write_text(new, encoding='utf-8')
+              print("PYTHON: dynamicSeo block removed")
+          PYEOF
+
+          echo '=== after sitemap grep ==='
+          sudo grep -n 'dynamicSeo\|sitemap' $CADDY || echo 'no dynamicSeo refs'
+
+          # Valida sintaxe Caddy
+          sudo caddy validate --config $CADDY || (echo 'INVALID, restoring backup' && sudo cp $BAK $CADDY && exit 1)
+          # Reload
+          sudo systemctl reload caddy
+          sleep 2
+
+          echo '=== verifying CSP servido ==='
+          curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/ | grep -i 'content-security-policy' | head -1
+
+          echo '=== verifying sitemap.xml ==='
+          curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/sitemap.xml | head -5
+          curl -s -H 'Host: richesseclub.com' http://127.0.0.1/sitemap.xml | head -5
+          REMOTE
