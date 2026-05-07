@@ -1,0 +1,43 @@
+# Richesse Club - Reduz Cache-Control do Caddyfile da VM
+# Substitui max-age=14400 e max-age=300 por max-age=60.
+# Evita que Chrome local prenda versoes antigas por horas.
+# One-shot manual (workflow_dispatch).
+
+name: "Richesse Club: Reduce Caddy Cache-Control"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reduce-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+
+      - name: Reduce cache + reload Caddy
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" \
+            "set -euo pipefail
+             echo '=== Backup Caddyfile ==='
+             sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.\$(date +%Y%m%d-%H%M%S)
+             echo '=== Antes ==='
+             sudo grep -nE 'max-age|Cache-Control' /etc/caddy/Caddyfile | head -20 || echo 'no matches'
+             echo '=== sed replace ==='
+             sudo sed -i 's/max-age=14400/max-age=60/g; s/max-age=300/max-age=60/g' /etc/caddy/Caddyfile
+             echo '=== Depois ==='
+             sudo grep -nE 'max-age|Cache-Control' /etc/caddy/Caddyfile | head -20 || echo 'no matches'
+             echo '=== Validate Caddyfile ==='
+             sudo /usr/bin/caddy validate --config /etc/caddy/Caddyfile
+             echo '=== Reload Caddy ==='
+             sudo systemctl reload caddy
+             echo '=== Probe ==='
+             curl -sI http://127.0.0.1/site.js -H 'Host: richesseclub.com' | grep -iE 'cache-control|content-length'"
