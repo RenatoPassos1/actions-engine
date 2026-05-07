@@ -1,0 +1,105 @@
+# Richesse Club - Fix DNS records na zona Cloudflare (one-shot)
+# Atualiza A apex + www para 137.131.143.236 (Oracle VM) com proxy laranja
+# Mantem A records existentes para api e monitor se ja apontarem pra 137.131.143.236
+# Trigger manual apenas.
+
+name: "Richesse Club: Fix CF DNS records (apex/www -> Oracle)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ip:
+        description: "Target origin IP"
+        default: "137.131.143.236"
+      enable_proxy:
+        description: "Enable CF proxy (orange cloud)"
+        default: "true"
+
+jobs:
+  fix-dns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Apply DNS records
+        env:
+          CF_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
+          TARGET_IP: ${{ github.event.inputs.target_ip }}
+          ENABLE_PROXY: ${{ github.event.inputs.enable_proxy }}
+        run: |
+          set -eu
+          ZONE="3aba7818769fce1223941e6d665dfb80"
+          PROXIED=true
+          [ "$ENABLE_PROXY" = "false" ] && PROXIED=false
+
+          echo "=== Token verify"
+          curl -sS "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+            -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import json,sys;d=json.load(sys.stdin);print('ok' if d.get('success') else d)"
+
+          echo ""
+          echo "=== Listando DNS records da zona richesseclub.com"
+          LIST=$(curl -sS "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?per_page=100" \
+            -H "Authorization: Bearer $CF_TOKEN")
+          echo "$LIST" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          if not d.get('success'):
+            print('FAIL:', d.get('errors',[{}])[0])
+            sys.exit(1)
+          for r in d.get('result',[]):
+            if r.get('type') in ('A','AAAA','CNAME'):
+              print(f\"{r['type']:6} {r['name']:35} {r['content']:40} proxied={r.get('proxied')} id={r['id']}\")
+          "
+
+          echo ""
+          echo "=== Atualizando A apex e www -> $TARGET_IP proxied=$PROXIED"
+          for NAME in richesseclub.com www.richesseclub.com; do
+            REC_ID=$(echo "$LIST" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          for r in d.get('result',[]):
+            if r.get('name')=='$NAME' and r.get('type')=='A':
+              print(r['id']); break
+          ")
+            if [ -z "$REC_ID" ]; then
+              echo "  $NAME: criando A record"
+              RESP=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records" \
+                -H "Authorization: Bearer $CF_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"type\":\"A\",\"name\":\"$NAME\",\"content\":\"$TARGET_IP\",\"proxied\":$PROXIED,\"ttl\":1}")
+            else
+              echo "  $NAME: PATCH id=$REC_ID -> $TARGET_IP proxied=$PROXIED"
+              RESP=$(curl -sS -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$REC_ID" \
+                -H "Authorization: Bearer $CF_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"content\":\"$TARGET_IP\",\"proxied\":$PROXIED,\"ttl\":1}")
+            fi
+            echo "$RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);print('   result:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
+          done
+
+          echo ""
+          echo "=== Removendo AAAA records antigos (apex/www) que mantenham o roteamento Hostinger"
+          for NAME in richesseclub.com www.richesseclub.com; do
+            for AAAA_ID in $(echo "$LIST" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          for r in d.get('result',[]):
+            if r.get('name')=='$NAME' and r.get('type')=='AAAA':
+              print(r['id'])
+          "); do
+              echo "  $NAME: deletando AAAA id=$AAAA_ID"
+              curl -sS -X DELETE "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$AAAA_ID" \
+                -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import json,sys;d=json.load(sys.stdin);print('   result:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
+            done
+          done
+
+          echo ""
+          echo "=== Purge cache"
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"purge_everything":true}' | python3 -c "import json,sys;d=json.load(sys.stdin);print('purge:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
+
+          echo ""
+          echo "=== Verificacao final"
+          sleep 5
+          curl -sI "https://richesseclub.com/site.js?cb=$(date +%s)" 2>&1 | head -10
