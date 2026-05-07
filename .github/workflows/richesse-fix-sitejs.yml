@@ -1,43 +1,35 @@
-name: "Richesse: Fix Caddyfile site.js handle"
+name: "Richesse Fix sitejs handle"
+
 on:
   workflow_dispatch:
+
 jobs:
   fix:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: mkdir -p ~/.ssh && echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key && chmod 600 ~/.ssh/oracle_key
-      - env:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+
+      - name: Remove siteJsApi handle
+        env:
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
             "$ORACLE_USER@$ORACLE_HOST" \
-            'set -euo pipefail
-             sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%Y%m%d-%H%M%S)
-             sudo python3 - <<PYEOF
-import re
-with open("/etc/caddy/Caddyfile", "r") as f:
-    content = f.read()
-# Remove o bloco @siteJsApi e seu handle
-pattern = r"\s*@siteJsApi\s+path\s+/site\.js\s*\n\s*handle\s+@siteJsApi\s*\{\s*\n\s*reverse_proxy\s+127\.0\.0\.1:3020\s*\n\s*\}"
-new_content, n = re.subn(pattern, "", content)
-if n == 0:
-    print("WARNING: pattern did not match, trying simpler")
-    # Tenta padrao mais flexivel
-    pattern2 = r"@siteJsApi[^{]*\{[^}]*\}"
-    new_content, n = re.subn(pattern2, "", content)
-print(f"Replaced {n} occurrences")
-with open("/etc/caddy/Caddyfile", "w") as f:
-    f.write(new_content)
-PYEOF
-             echo "=== After fix - sitejs handle should be GONE ==="
-             sudo grep -n "siteJsApi" /etc/caddy/Caddyfile || echo "siteJsApi: NOT FOUND (good)"
-             echo "=== Validating Caddyfile ==="
-             sudo /usr/bin/caddy validate --config /etc/caddy/Caddyfile
-             echo "=== Reload Caddy ==="
-             sudo systemctl reload caddy
-             echo "=== Probe site.js (should now serve static file) ==="
-             curl -sI http://127.0.0.1/site.js -H "Host: richesseclub.com" | head -5
-             echo "=== Build marker ==="
-             curl -s http://127.0.0.1/site.js -H "Host: richesseclub.com" | grep RICHESSE_BUILD | head -1'
+            "set -euo pipefail && \
+             sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.\$(date +%Y%m%d-%H%M%S) && \
+             sudo python3 -c 'import re; c=open(\"/etc/caddy/Caddyfile\").read(); p=r\"\s*@siteJsApi\s+path\s+/site\.js\s*\n\s*handle\s+@siteJsApi\s*\{\s*\n\s*reverse_proxy\s+127\.0\.0\.1:3020\s*\n\s*\}\"; new,n=re.subn(p,\"\",c); open(\"/etc/caddy/Caddyfile\",\"w\").write(new); print(\"Replaced:\",n)' && \
+             echo '=== siteJsApi remaining ===' && \
+             (sudo grep -n siteJsApi /etc/caddy/Caddyfile || echo 'NOT FOUND - GOOD') && \
+             sudo /usr/bin/caddy validate --config /etc/caddy/Caddyfile && \
+             sudo systemctl reload caddy && \
+             sleep 2 && \
+             echo '=== Probe site.js ===' && \
+             curl -sI http://127.0.0.1/site.js -H 'Host: richesseclub.com' | head -3 && \
+             echo '=== Build ===' && \
+             curl -s http://127.0.0.1/site.js -H 'Host: richesseclub.com' | grep RICHESSE_BUILD | head -1"
