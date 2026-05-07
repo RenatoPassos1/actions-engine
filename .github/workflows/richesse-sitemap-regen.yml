@@ -1,0 +1,69 @@
+# Richesse Club - Regenera sitemap.xml a cada 6h
+# - Checkout richesse-club main
+# - Roda scripts/generate_sitemap.py (consulta Supabase REST + URLs estaticas de sitemap-static.xml)
+# - Se sitemap.xml mudou: commit + push pra main
+# - richesse-deploy.yml (polling 5min) pega o novo SHA e faz rsync pra Oracle
+
+name: "Richesse Club: Regenerate sitemap (6h)"
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: richesse-sitemap-regen
+  cancel-in-progress: false
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout richesse-club
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/richesse-club
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          persist-credentials: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run sitemap generator
+        env:
+          SUPABASE_URL: https://jvjirmglnorgmhuqjnvm.supabase.co
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k
+        run: |
+          python scripts/generate_sitemap.py
+          ls -la sitemap.xml
+          python -c "import xml.etree.ElementTree as ET; t=ET.parse('sitemap.xml'); print(f'URLs: {len(list(t.getroot()))}')"
+
+      - name: Commit if changed
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          # Compara apenas sitemap.xml (sitemap-static.xml nao muda automaticamente)
+          if git diff --quiet sitemap.xml; then
+            echo "Sitemap nao mudou, sem commit"
+          else
+            URLS=$(python -c "import xml.etree.ElementTree as ET; t=ET.parse('sitemap.xml'); print(len(list(t.getroot())))")
+            git add sitemap.xml
+            git commit -m "chore(sitemap): regen automatico - $URLS URLs ($(date -u +%Y-%m-%dT%H:%MZ))"
+            git push origin main
+            echo "Push feito, richesse-deploy pega no proximo polling"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Richesse Club - Sitemap Regen" >> $GITHUB_STEP_SUMMARY
+          if [ -f sitemap.xml ]; then
+            URLS=$(python -c "import xml.etree.ElementTree as ET; t=ET.parse('sitemap.xml'); print(len(list(t.getroot())))" 2>/dev/null || echo "?")
+            SIZE=$(stat -c%s sitemap.xml 2>/dev/null || echo "?")
+            echo "- URLs: $URLS" >> $GITHUB_STEP_SUMMARY
+            echo "- Size: $SIZE bytes" >> $GITHUB_STEP_SUMMARY
+          fi
