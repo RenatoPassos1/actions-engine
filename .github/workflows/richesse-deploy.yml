@@ -1,0 +1,146 @@
+# Richesse Club - Deploy automatico para Oracle VPS
+# Site estatico: 77 HTMLs + site.js + styles.css + sitemap/robots/llms.
+# Polla HEAD do branch main do richesse-club a cada 5 min.
+# Se SHA mudou: ssh para Oracle, git pull em /opt/richesse-club, rsync para /var/www/richesseclub.
+#
+# Pre-requisitos (secrets em actions-engine):
+#   ORACLE_SSH_KEY - chave privada SSH (openclaw_do) base64 encoded
+#   ORACLE_HOST    - 137.131.143.236
+#   ORACLE_USER    - ubuntu
+#   REPO_PAT       - PAT com read:repo nos repos privados
+
+name: "Richesse Club: Oracle Auto-Deploy (poll main SHA)"
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: richesse-oracle-deploy
+  cancel-in-progress: false
+
+jobs:
+  poll-and-deploy:
+    name: Poll SHA and deploy if changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Get HEAD SHA of richesse-club/main
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+        run: |
+          SHA=$(gh api repos/RenatoPassos1/richesse-club/commits/main --jq '.sha')
+          if [ -z "$SHA" ]; then
+            echo "::error::Failed to fetch HEAD SHA"
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Current HEAD: $SHA"
+
+      - name: Restore last deployed SHA
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .last-deployed-sha
+          key: richesse-oracle-last-deployed-sha
+
+      - name: Compare SHAs
+        id: compare
+        run: |
+          CURRENT="${{ steps.sha.outputs.sha }}"
+          if [ -f .last-deployed-sha ]; then
+            LAST=$(cat .last-deployed-sha)
+          else
+            LAST=""
+          fi
+          if [ "$CURRENT" = "$LAST" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "SHA matches last deploy, skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "New SHA detected, will deploy"
+          fi
+
+      - name: Setup SSH
+        if: steps.compare.outputs.skip == 'false'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy to Oracle (rsync HTMLs + site.js + styles.css)
+        if: steps.compare.outputs.skip == 'false'
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" \
+            'set -euo pipefail
+             cd /opt/richesse-club
+             git fetch origin main
+             git reset --hard origin/main
+             HEAD_SHORT=$(git rev-parse --short HEAD)
+             echo "Pulled: $HEAD_SHORT"
+             sudo rsync -a --delete \
+               --include="*.html" \
+               --include="site.js" \
+               --include="styles.css" \
+               --include="sitemap.xml" \
+               --include="robots.txt" \
+               --include="llms.txt" \
+               --include="manifest.webmanifest" \
+               --include="sw.js" \
+               --include="favicon.ico" \
+               --include="apple-touch-icon.png" \
+               --exclude=".git/" \
+               --exclude="node_modules/" \
+               --exclude="scrapers/" \
+               --exclude="api/" \
+               --exclude="worker/" \
+               --exclude="db/" \
+               --exclude="scripts/" \
+               --exclude=".github/" \
+               --exclude=".claude/" \
+               --exclude=".env*" \
+               --exclude="*.md" \
+               --exclude="*.py" \
+               --exclude="*.sh" \
+               --exclude="docker*" \
+               --exclude="package*.json" \
+               --exclude="tsconfig*" \
+               --exclude="pnpm-*" \
+               --exclude="*.txt.example" \
+               --exclude=".gitignore" \
+               --exclude=".gitattributes" \
+               /opt/richesse-club/ /var/www/richesseclub/
+             echo "--- /var/www/richesseclub/ post-deploy:"
+             ls -la /var/www/richesseclub/site.js /var/www/richesseclub/index.html | awk "{print \$5, \$9}"
+             echo "--- site.js head (build marker):"
+             grep -E "RICHESSE_BUILD" /var/www/richesseclub/site.js | head -1
+             echo "--- origin probe:"
+             curl -fsS -o /dev/null -w "site.js status: %{http_code}\n" http://127.0.0.1/site.js -H "Host: richesseclub.com" || true'
+
+      - name: Save deployed SHA
+        if: steps.compare.outputs.skip == 'false'
+        run: echo "${{ steps.sha.outputs.sha }}" > .last-deployed-sha
+
+      - name: Cache deployed SHA
+        if: steps.compare.outputs.skip == 'false'
+        uses: actions/cache/save@v4
+        with:
+          path: .last-deployed-sha
+          key: richesse-oracle-last-deployed-sha
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Richesse Club Oracle Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- HEAD SHA: \`${{ steps.sha.outputs.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Skipped: ${{ steps.compare.outputs.skip }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Site: https://richesseclub.com" >> $GITHUB_STEP_SUMMARY
