@@ -126,12 +126,18 @@ jobs:
                --exclude='.gitattributes' \
                --exclude='caddy-*' \
                \"\$REPO_DIR/\" /opt/richesse-club/static/
+             # Forca mtime atual (rsync -a preserva mtime do clone, o que mantem Caddy file_server cache)
+             sudo find /opt/richesse-club/static -type f -exec touch {} +
+             # Reload Caddy pra invalidar file descriptor cache (sem downtime)
+             sudo systemctl reload caddy || true
              echo '--- /opt/richesse-club/static/ post-deploy:'
              ls -la /opt/richesse-club/static/site.js /opt/richesse-club/static/index.html 2>/dev/null | awk '{print \$5, \$9}'
              echo '--- site.js build marker:'
              grep -E 'RICHESSE_BUILD' /opt/richesse-club/static/site.js | head -1
              echo '--- origin probe:'
-             curl -fsS -o /dev/null -w 'site.js status: %{http_code}\n' http://127.0.0.1/site.js -H 'Host: richesseclub.com' || true"
+             curl -fsS -o /tmp/sj-probe.js http://127.0.0.1/site.js -H 'Host: richesseclub.com' && \
+               echo \"served size: \$(wc -c < /tmp/sj-probe.js) bytes\" && \
+               grep -E 'RICHESSE_BUILD' /tmp/sj-probe.js | head -1 || true"
 
       - name: Save deployed SHA
         if: steps.compare.outputs.skip == 'false'
