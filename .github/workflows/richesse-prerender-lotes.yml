@@ -1,0 +1,100 @@
+# Richesse Club - Pre-render HTMLs por lote + sync direto pra Oracle
+# Roda a cada 6h, gera 1 HTML por lote (lotes-html/<slug>/index.html), rsync pra
+# /var/www/richesseclub/lote/<slug>/index.html. Caddy serve estatico, crawlers
+# veem conteudo SEO pre-populado (title, meta, JSON-LD, FAQ, body).
+
+name: "Richesse Club: Pre-render lotes (6h)"
+
+on:
+  schedule:
+    - cron: "30 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: richesse-prerender
+  cancel-in-progress: false
+
+jobs:
+  prerender:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout richesse-club
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/richesse-club
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          sparse-checkout: |
+            scripts
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run prerender
+        env:
+          SUPABASE_URL: https://jvjirmglnorgmhuqjnvm.supabase.co
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k
+        run: |
+          python scripts/prerender_lotes.py
+          echo "=== output stats ==="
+          find lotes-html -name 'index.html' | wc -l
+          du -sh lotes-html
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Rsync pre-rendered HTMLs to Oracle
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          # Sync lotes-html/<slug>/index.html -> /var/www/richesseclub/lote/<slug>/index.html
+          # Usa --delete pra remover lotes que nao existem mais no banco
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no" \
+            lotes-html/ \
+            "$ORACLE_USER@$ORACLE_HOST:/tmp/richesse-lotes/"
+
+          # Move pra /var/www com sudo (sshd nao pode rsync direto pra /var/www)
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          set -eu
+          sudo mkdir -p /var/www/richesseclub/lote
+          # Sync atomico via rsync local (Oracle -> /var/www)
+          sudo rsync -a --delete /tmp/richesse-lotes/ /var/www/richesseclub/lote/
+          # Touch pra forçar Caddy invalidate cache
+          sudo find /var/www/richesseclub/lote -name 'index.html' -exec touch {} +
+          # Reload Caddy
+          sudo systemctl reload caddy || true
+          # Limpa staging
+          rm -rf /tmp/richesse-lotes
+          echo "=== files in /var/www/richesseclub/lote ==="
+          sudo find /var/www/richesseclub/lote -name 'index.html' | wc -l
+          REMOTE
+
+      - name: Smoke test
+        run: |
+          IP=$(dig +short richesseclub.com @1.1.1.1 | head -1)
+          echo "=== test SSR via Cloudflare ==="
+          # Pega um slug recente do Supabase
+          SLUG=$(curl -sS "https://jvjirmglnorgmhuqjnvm.supabase.co/rest/v1/lotes?select=slug&order=data_fim_leilao.desc&limit=1" \
+            -H "apikey: ${{ env.ANON || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k' }}" \
+            | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['slug'] if d else '')")
+          echo "Testing slug: $SLUG"
+          if [ -n "$SLUG" ]; then
+            echo "--- title ---"
+            curl -fsS --resolve "richesseclub.com:443:$IP" -H "User-Agent: Googlebot/2.1" \
+              "https://richesseclub.com/lote/$SLUG" | grep -oE '<title[^>]*>[^<]*</title>' | head -1
+            echo "--- json-ld count (deve ser 3) ---"
+            curl -fsS --resolve "richesseclub.com:443:$IP" -H "User-Agent: Googlebot/2.1" \
+              "https://richesseclub.com/lote/$SLUG" | grep -c 'application/ld+json' || true
+            echo "--- FAQ items count ---"
+            curl -fsS --resolve "richesseclub.com:443:$IP" -H "User-Agent: Googlebot/2.1" \
+              "https://richesseclub.com/lote/$SLUG" | grep -c '<details class="faq__item">' || true
+          fi
