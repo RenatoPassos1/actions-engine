@@ -33,16 +33,22 @@ jobs:
       - name: Install wrangler
         run: npm install -g wrangler@3
 
-      - name: Get Cloudflare account id
+      - name: Get Cloudflare account id (via zone)
         id: acct
         env:
           CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
         run: |
-          # Tenta listar accounts; pega o primeiro
-          ACCT=$(curl -sS "https://api.cloudflare.com/client/v4/accounts" \
-            -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['result'][0]['id'] if d.get('success') and d.get('result') else '')")
+          ZONE="3aba7818769fce1223941e6d665dfb80"
+          # Pega account.id da zone richesseclub.com (token tem zone:read implicito)
+          ACCT=$(curl -sS "https://api.cloudflare.com/client/v4/zones/$ZONE" \
+            -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('result',{}).get('account',{}).get('id',''))")
           if [ -z "$ACCT" ]; then
-            echo "::error::Could not determine account id"
+            # Fallback: tenta listar accounts (precisa Account:Read)
+            ACCT=$(curl -sS "https://api.cloudflare.com/client/v4/accounts" \
+              -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['result'][0]['id'] if d.get('success') and d.get('result') else '')")
+          fi
+          if [ -z "$ACCT" ]; then
+            echo "::error::Could not determine account id (token precisa de Zone:Read minimo)"
             exit 1
           fi
           echo "id=$ACCT" >> "$GITHUB_OUTPUT"
