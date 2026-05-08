@@ -1,0 +1,87 @@
+# Richesse Club - Substitui rewrite forcado /lote/<slug> -> /lote.html por try_files
+# Permite Caddy servir /lote/<slug>/index.html (pre-renderizado) quando existir,
+# fallback ao template /lote.html (CSR) quando nao existir.
+
+name: "Richesse Club: Caddy lote prerender route"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Apply patch
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          set -eu
+          CADDY=/etc/caddy/Caddyfile
+          BAK=/tmp/Caddyfile.bk-$(date +%s)
+          sudo cp $CADDY $BAK
+
+          if sudo grep -q '# RICHESSE_LOTE_PRERENDER' $CADDY; then
+            echo "patch ja aplicado"
+          else
+            sudo python3 - "$CADDY" << 'PYEOF'
+          import sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          c = p.read_text(encoding='utf-8')
+
+          # Substitui o bloco antigo:
+          #   @loteDetalhe path_regexp ^/lote/[^/]+$
+          #   rewrite @loteDetalhe /lote.html
+          # por:
+          #   # RICHESSE_LOTE_PRERENDER
+          #   @loteRoute path_regexp ^/lote/[^/]+/?$
+          #   handle @loteRoute {
+          #       try_files {path}/index.html /lote.html
+          #       file_server
+          #   }
+          old = (
+              '    @loteDetalhe path_regexp ^/lote/[^/]+$\n'
+              '    rewrite @loteDetalhe /lote.html\n'
+          )
+          new = (
+              '    # RICHESSE_LOTE_PRERENDER\n'
+              '    @loteRoute path_regexp ^/lote/[^/]+/?$\n'
+              '    handle @loteRoute {\n'
+              '        try_files {path}/index.html /lote.html\n'
+              '        file_server\n'
+              '    }\n'
+          )
+          if old in c:
+              c = c.replace(old, new, 1)
+              p.write_text(c, encoding='utf-8')
+              print('PYTHON: rewrite substituido por handle/try_files')
+          else:
+              print('PYTHON: bloco antigo nao encontrado, anexando handle no inicio do bloco https')
+              # Tenta inserir o handle bloco logo apos "richesseclub.com, www.richesseclub.com {"
+              marker = 'richesseclub.com, www.richesseclub.com {\n'
+              if marker in c:
+                  c = c.replace(marker, marker + '\n' + new, 1)
+                  p.write_text(c, encoding='utf-8')
+                  print('PYTHON: handle anexado')
+              else:
+                  print('PYTHON: nem o bloco old nem o marker do bloco https foram encontrados')
+                  sys.exit(1)
+          PYEOF
+            sudo caddy validate --config $CADDY || (echo 'INVALID, restoring' && sudo cp $BAK $CADDY && exit 1)
+            sudo systemctl reload caddy
+            sleep 2
+          fi
+
+          echo "=== Caddyfile loteRoute block ==="
+          sudo grep -A 5 'RICHESSE_LOTE_PRERENDER' $CADDY || true
+          REMOTE
