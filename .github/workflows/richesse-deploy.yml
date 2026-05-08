@@ -96,11 +96,16 @@ jobs:
              HEAD_SHORT=\$(git rev-parse --short HEAD)
              echo \"Pulled: \$HEAD_SHORT\"
              sudo mkdir -p /var/www/richesseclub
+             # IMPORTANTE: --filter 'protect /lote/' preserva HTMLs pre-renderizados gerados
+             # pelo workflow richesse-prerender-lotes (18.883 arquivos /lote/<slug>/index.html)
              sudo rsync -a --delete \
+               --filter='protect /lote/' \
+               --filter='protect /lote/**' \
                --include='*.html' \
                --include='site.js' \
                --include='styles.css' \
                --include='sitemap.xml' \
+               --include='sitemap-static.xml' \
                --include='robots.txt' \
                --include='llms.txt' \
                --include='manifest.webmanifest' \
@@ -112,6 +117,7 @@ jobs:
                --exclude='worker/' \
                --exclude='db/' \
                --exclude='scripts/' \
+               --exclude='lotes-html/' \
                --exclude='.github/' \
                --exclude='.claude/' \
                --exclude='.env*' \
