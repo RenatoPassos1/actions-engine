@@ -1,0 +1,77 @@
+# Richesse Club - Deploy do SSR Worker para /lote/<slug>
+# Usa wrangler com RICHESSE_CF_TOKEN (precisa do escopo Workers Scripts:Edit, Workers Routes:Edit, Account Settings:Read).
+# Roda manualmente OU em push de richesse-club/worker/.
+
+name: "Richesse Club: Deploy SSR Worker"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: richesse-worker-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout richesse-club
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/richesse-club
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          sparse-checkout: |
+            worker
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install wrangler
+        run: npm install -g wrangler@3
+
+      - name: Get Cloudflare account id
+        id: acct
+        env:
+          CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
+        run: |
+          # Tenta listar accounts; pega o primeiro
+          ACCT=$(curl -sS "https://api.cloudflare.com/client/v4/accounts" \
+            -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['result'][0]['id'] if d.get('success') and d.get('result') else '')")
+          if [ -z "$ACCT" ]; then
+            echo "::error::Could not determine account id"
+            exit 1
+          fi
+          echo "id=$ACCT" >> "$GITHUB_OUTPUT"
+          echo "Account: $ACCT"
+
+      - name: Deploy Worker
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.acct.outputs.id }}
+        run: |
+          wrangler deploy --no-bundle
+
+      - name: Smoke test
+        run: |
+          sleep 5
+          echo "=== test SSR Worker via Cloudflare ==="
+          IP=$(dig +short richesseclub.com @1.1.1.1 | head -1)
+          curl -sI --resolve "richesseclub.com:443:$IP" -H "User-Agent: Googlebot/2.1" \
+            "https://richesseclub.com/lote/caixa-25250000097-34aabf" | head -10
+          echo ""
+          echo "=== title (deve ter dados reais) ==="
+          curl -fsS --resolve "richesseclub.com:443:$IP" -H "User-Agent: Googlebot/2.1" \
+            "https://richesseclub.com/lote/caixa-25250000097-34aabf" | grep -oE '<title[^>]*>[^<]*</title>' | head -1
+          echo ""
+          echo "=== json-ld count (deve ser 3: product + breadcrumb + faq) ==="
+          curl -fsS --resolve "richesseclub.com:443:$IP" -H "User-Agent: Googlebot/2.1" \
+            "https://richesseclub.com/lote/caixa-25250000097-34aabf" | grep -c 'application/ld+json'
+          echo ""
+          echo "=== FAQ items count (deve ser >= 5) ==="
+          curl -fsS --resolve "richesseclub.com:443:$IP" -H "User-Agent: Googlebot/2.1" \
+            "https://richesseclub.com/lote/caixa-25250000097-34aabf" | grep -c '<details class="faq__item">'
