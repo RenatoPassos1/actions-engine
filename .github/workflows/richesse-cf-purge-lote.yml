@@ -1,0 +1,32 @@
+# Richesse Club - Purge agressivo do Cloudflare cache de /lote/*
+# Roda apos prerender pra invalidar versoes antigas cacheadas.
+
+name: "Richesse Club: CF purge cache (lote/*)"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cloudflare purge_everything
+        env:
+          CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
+        run: |
+          ZONE="3aba7818769fce1223941e6d665dfb80"
+          # Purge total porque cache pode ter centenas de variantes
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"purge_everything":true}' | python3 -c "import json,sys;d=json.load(sys.stdin);print('purge:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
+          echo "purge sent, aguarde ~30s pra propagar nos edges"
+          sleep 30
+          echo "=== test apos purge ==="
+          IP=$(dig +short richesseclub.com @1.1.1.1 | head -1)
+          for SLUG in caixa-25250000097-34aabf caixa-25250000089-45d9e5 caixa-25250000070-f98e32 caixa-18770001672-78ef3c; do
+            SIZE=$(curl -sS --resolve "richesseclub.com:443:$IP" "https://richesseclub.com/lote/$SLUG" -o /tmp/t.html -w "%{size_download}")
+            TITLE=$(grep -oE '<title[^>]*>[^<]*</title>' /tmp/t.html | head -1 | sed 's/<[^>]*>//g')
+            echo "$SLUG: ${SIZE}b - $TITLE"
+          done
