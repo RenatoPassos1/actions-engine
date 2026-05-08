@@ -1,0 +1,126 @@
+# Richesse Club - Fix do route /lote/<slug>: usa 2 handles mutuamente exclusivos
+# Substitui try_files global + handle isolado por:
+#   handle @loteRoute { try_files {path}/index.html /lote.html; file_server }
+#   handle { try_files {path} {path}.html /index.html; file_server }
+# Garante que /lote/<slug> caia no handle correto e nao seja interceptado pelo try_files global.
+
+name: "Richesse Club: Caddy lote prerender FIX (2 handles)"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Apply patch
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          set -eu
+          CADDY=/etc/caddy/Caddyfile
+          BAK=/tmp/Caddyfile.bk-$(date +%s)
+          sudo cp $CADDY $BAK
+
+          if sudo grep -q '# RICHESSE_LOTE_PRERENDER_V2' $CADDY; then
+            echo "patch v2 ja aplicado"
+          else
+            sudo python3 - "$CADDY" << 'PYEOF'
+          import sys, pathlib, re
+          p = pathlib.Path(sys.argv[1])
+          c = p.read_text(encoding='utf-8')
+
+          # Localiza o bloco https richesseclub.com (nao .com.br)
+          # Precisamos substituir:
+          #   # RICHESSE_LOTE_PRERENDER  (v1, com handle isolado)
+          #   @loteRoute ...
+          #   handle @loteRoute { ... }
+          #   try_files {path} {path}.html /index.html
+          #   file_server
+          # por:
+          #   # RICHESSE_LOTE_PRERENDER_V2
+          #   @loteRoute path_regexp ^/lote/[^/]+/?$
+          #   handle @loteRoute {
+          #       try_files {path}/index.html /lote.html
+          #       file_server
+          #   }
+          #   handle {
+          #       try_files {path} {path}.html /index.html
+          #       file_server
+          #   }
+          old_pattern = re.compile(
+              r'    # RICHESSE_LOTE_PRERENDER\n'
+              r'    @loteRoute path_regexp \^/lote/\[\^/\]\+/\?\$\n'
+              r'    handle @loteRoute \{\n'
+              r'        try_files \{path\}/index\.html /lote\.html\n'
+              r'        file_server\n'
+              r'    \}\n'
+              r'    try_files \{path\} \{path\}\.html /index\.html\n'
+              r'    file_server\n',
+              re.MULTILINE
+          )
+          new = (
+              '    # RICHESSE_LOTE_PRERENDER_V2\n'
+              '    @loteRoute path_regexp ^/lote/[^/]+/?$\n'
+              '    handle @loteRoute {\n'
+              '        try_files {path}/index.html /lote.html\n'
+              '        file_server\n'
+              '    }\n'
+              '    handle {\n'
+              '        try_files {path} {path}.html /index.html\n'
+              '        file_server\n'
+              '    }\n'
+          )
+          new_c, n = old_pattern.subn(new, c, count=1)
+          if n == 0:
+              print('PYTHON: bloco v1 nao encontrado, tentando padrao alternativo')
+              # Tenta com try_files global apos handle (ordem variavel)
+              alt_pattern = re.compile(
+                  r'    # RICHESSE_LOTE_PRERENDER\n'
+                  r'(.*?\n)+?'
+                  r'    try_files \{path\} \{path\}\.html /index\.html\n'
+                  r'    file_server\n',
+                  re.MULTILINE | re.DOTALL
+              )
+              new_c, n = alt_pattern.subn(new, c, count=1)
+              if n == 0:
+                  print('PYTHON: nem padrao alt encontrado, abort')
+                  sys.exit(1)
+          p.write_text(new_c, encoding='utf-8')
+          print('PYTHON: patch v2 aplicado')
+          PYEOF
+            sudo caddy validate --config $CADDY || (echo 'INVALID, restoring' && sudo cp $BAK $CADDY && exit 1)
+            sudo systemctl reload caddy
+            sleep 2
+          fi
+
+          echo "=== verifying ==="
+          sudo grep -A 12 'RICHESSE_LOTE_PRERENDER' $CADDY | head -20
+          echo ""
+          echo "=== test local /lote/<slug> ==="
+          curl -sI -H 'Host: richesseclub.com' http://127.0.0.1/lote/caixa-18770001672-78ef3c | head -5
+          echo ""
+          echo "=== get title (deve ser do prerender, nao home) ==="
+          curl -s -H 'Host: richesseclub.com' http://127.0.0.1/lote/caixa-18770001672-78ef3c | grep -oE '<title[^>]*>[^<]*</title>' | head -1
+          REMOTE
+
+      - name: Cloudflare purge
+        env:
+          CF_TOKEN: ${{ secrets.RICHESSE_CF_TOKEN }}
+        run: |
+          ZONE="3aba7818769fce1223941e6d665dfb80"
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"purge_everything":true}' | python3 -c "import json,sys;d=json.load(sys.stdin);print('purge:', 'OK' if d.get('success') else d.get('errors',[{}])[0])"
