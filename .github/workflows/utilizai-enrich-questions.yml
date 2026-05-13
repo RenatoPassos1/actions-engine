@@ -1,26 +1,23 @@
-# UtilizAí — Enrichment de questões (SEO thin content fix)
+# UtilizAí — Enrichment de questões (SEO thin content fix) - MATRIX 4 SHARDS
 #
 # Contexto: ~10.5k questões publicadas tinham 119 palavras médias, classificadas
-# como "thin content" no GSC. Este workflow enriquece `metadata.seo_intro_pt/en`,
-# `seo_topics_pt/en`, `seo_faq_pt/en` e (se faltar) `explanation` via LLM.
+# como "thin content" no GSC. Este workflow enriquece metadata.seo_intro_pt/en,
+# seo_topics_pt/en, seo_faq_pt/en e (se faltar) explanation via LLM.
 #
-# Persistência: tabela `questions` (Supabase). Sem filesystem stateful, idempotente:
-# pode re-rodar quantas vezes quiser, skipa quem já tem metadata.seo_intro_pt > 200 chars.
+# Estratégia matrix: 4 shards paralelos. Cada shard pega ~1/4 dos itens via
+# FNV-1a hash do slug % 4. Sem overlap, sem duplicação. 4 jobs paralelos =
+# 4x mais throughput que single-job.
 #
-# Schedule: a cada 5h. Cada run processa quanto couber em 350 min (5h50m de timeout).
-# Backoff de Groq + rotação multi-modelo + DeepSeek primary cabem por 5h e idempotência
-# garante continuação na próxima run.
+# Persistência: tabela `questions` (Supabase). Idempotente, skipa quem já tem
+# metadata.seo_intro_pt > 200 chars.
 #
-# Secrets esperados (configurar em actions-engine, Settings, Secrets and variables, Actions):
-#   REPO_PAT                              : PAT pra checkout do RenatoPassos1/UtilizAi
-#   UTILIZAI_DEEPSEEK_API_KEY             : DeepSeek (primary, deepseek-v4-flash)
-#   UTILIZAI_GROQ_API_KEY                 : Groq key 1 (fallback)
-#   UTILIZAI_GROQ_API_KEY_2               : Groq key 2 (round-robin)
-#   UTILIZAI_GROQ_API_KEY_3               : Groq key 3
-#   UTILIZAI_GROQ_API_KEY_4               : Groq key 4
-#   UTILIZAI_GROQ_API_KEY_5               : Groq key 5
-#   UTILIZAI_SUPABASE_URL                 : https://<ref>.supabase.co
-#   UTILIZAI_SUPABASE_SERVICE_ROLE_KEY    : service_role key (bypass RLS)
+# Schedule: a cada 5h. Cada run processa quanto couber em 350 min.
+# DeepSeek paid tier aceita 30+ concurrent (testado), então 4 shards × conc 8 = 32
+# workers totais fica confortável dentro do rate limit.
+#
+# Secrets esperados:
+#   REPO_PAT, UTILIZAI_DEEPSEEK_API_KEY, UTILIZAI_GROQ_API_KEY[_2-5],
+#   UTILIZAI_SUPABASE_URL, UTILIZAI_SUPABASE_SERVICE_ROLE_KEY
 
 name: "UtilizAí: Enrich Questions (SEO)"
 
@@ -30,13 +27,17 @@ on:
   workflow_dispatch:
     inputs:
       concurrency:
-        description: "Workers paralelos (default 5)"
+        description: "Workers paralelos por shard (default 8)"
         required: false
-        default: "5"
+        default: "8"
       limit:
-        description: "Limite máximo de itens processados (default 99999)"
+        description: "Limite por shard (default 99999)"
         required: false
         default: "99999"
+      total_shards:
+        description: "Total de shards paralelos (default 4)"
+        required: false
+        default: "4"
 
 concurrency:
   group: utilizai-enrich-questions
@@ -47,9 +48,13 @@ permissions:
 
 jobs:
   enrich:
-    name: Enrich questions metadata
+    name: Shard ${{ matrix.shard }}/${{ github.event.inputs.total_shards || '4' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
 
     steps:
       - name: Checkout UtilizAi (private)
@@ -69,7 +74,7 @@ jobs:
       - name: Install deps
         run: npm ci --no-audit --no-fund
 
-      - name: Run enrichment
+      - name: Run enrichment (shard ${{ matrix.shard }})
         env:
           NEXT_PUBLIC_SUPABASE_URL:   ${{ secrets.UTILIZAI_SUPABASE_URL }}
           SUPABASE_SECRET_KEY:        ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
@@ -85,13 +90,24 @@ jobs:
           NODE_OPTIONS:               "--max-old-space-size=4096"
         run: |
           set -eu
-          CONCURRENCY="${{ github.event.inputs.concurrency || '5' }}"
+          CONCURRENCY="${{ github.event.inputs.concurrency || '8' }}"
           LIMIT="${{ github.event.inputs.limit || '99999' }}"
-          echo "Starting enrich-thin-questions.ts concurrency=${CONCURRENCY} limit=${LIMIT}"
-          npx tsx scripts/enrich-thin-questions.ts --concurrency "${CONCURRENCY}" --limit "${LIMIT}"
+          TOTAL_SHARDS="${{ github.event.inputs.total_shards || '4' }}"
+          SHARD="${{ matrix.shard }}"
+          echo "Starting enrich-thin-questions.ts shard=${SHARD}/${TOTAL_SHARDS} concurrency=${CONCURRENCY} limit=${LIMIT}"
+          npx tsx scripts/enrich-thin-questions.ts \
+            --concurrency "${CONCURRENCY}" \
+            --limit "${LIMIT}" \
+            --shard "${SHARD}" \
+            --total-shards "${TOTAL_SHARDS}"
 
-      - name: Summary
-        if: always()
+  summary:
+    name: Coverage summary
+    runs-on: ubuntu-latest
+    needs: enrich
+    if: always()
+    steps:
+      - name: Report enrichment coverage
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.UTILIZAI_SUPABASE_URL }}
           SUPABASE_SECRET_KEY:      ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
@@ -109,7 +125,7 @@ jobs:
             -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
             -H "Prefer: count=exact" \
             -H "Range: 0-0" -I 2>/dev/null | grep -i 'content-range' | awk -F'/' '{print $2}' | tr -d '\r')
-          echo "## UtilizAí — Enrich Questions" >> $GITHUB_STEP_SUMMARY
+          echo "## UtilizAí — Enrich Questions (Matrix 4 shards)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
           echo "- **Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
