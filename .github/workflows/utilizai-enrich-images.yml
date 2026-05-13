@@ -1,25 +1,20 @@
-# UtilizAí — Enrichment de imagens (SEO thin content fix)
+# UtilizAí — Enrichment de imagens (SEO thin content fix) - MATRIX 4 SHARDS
 #
 # Contexto: ~24k imagens editoriais publicadas tinham description curta (<300 chars),
-# classificadas como "thin content" no GSC (5179 páginas Detectada não indexada).
-# Este workflow re-escreve `description_pt/en` em Markdown com seções:
-#   - Lead (1-2 frases pro meta description)
-#   - Sobre o tema (3-4 parágrafos)
-#   - Perguntas frequentes (3 Q&A)
-# Total ~350-500 palavras únicas por imagem.
+# classificadas como "thin content" no GSC. Re-escreve description_pt/en em
+# Markdown com lead + Sobre o tema + FAQ.
+#
+# Estratégia matrix: 4 shards paralelos. Cada shard pega ~1/4 dos itens via
+# FNV-1a hash do slug % 4. Sem overlap, sem duplicação.
 #
 # Persistência: tabela `images` (Supabase). Idempotente, skipa quem já tem
 # description_pt > 300 chars.
 #
-# Schedule: a cada 5h (offset 45min em relação a enrich-questions pra não competir
-# pelo TPM da DeepSeek). Cada run pega quantos couber em 350 min.
+# Schedule: a cada 5h (offset 45min vs questions).
 #
-# Secrets esperados (configurar em actions-engine):
-#   REPO_PAT                              : PAT pra checkout do RenatoPassos1/UtilizAi
-#   UTILIZAI_DEEPSEEK_API_KEY             : DeepSeek (primary)
-#   UTILIZAI_GROQ_API_KEY[_2-5]           : Groq keys rotativas (fallback)
-#   UTILIZAI_SUPABASE_URL                 : https://<ref>.supabase.co
-#   UTILIZAI_SUPABASE_SERVICE_ROLE_KEY    : service_role key
+# Secrets esperados:
+#   REPO_PAT, UTILIZAI_DEEPSEEK_API_KEY, UTILIZAI_GROQ_API_KEY[_2-5],
+#   UTILIZAI_SUPABASE_URL, UTILIZAI_SUPABASE_SERVICE_ROLE_KEY
 
 name: "UtilizAí: Enrich Images (SEO)"
 
@@ -29,13 +24,17 @@ on:
   workflow_dispatch:
     inputs:
       concurrency:
-        description: "Workers paralelos (default 5)"
+        description: "Workers paralelos por shard (default 8)"
         required: false
-        default: "5"
+        default: "8"
       limit:
-        description: "Limite máximo de itens processados (default 99999)"
+        description: "Limite por shard (default 99999)"
         required: false
         default: "99999"
+      total_shards:
+        description: "Total de shards paralelos (default 4)"
+        required: false
+        default: "4"
       category:
         description: "Filtrar por categoria (opcional)"
         required: false
@@ -50,9 +49,13 @@ permissions:
 
 jobs:
   enrich:
-    name: Enrich images description
+    name: Shard ${{ matrix.shard }}/${{ github.event.inputs.total_shards || '4' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
 
     steps:
       - name: Checkout UtilizAi (private)
@@ -72,7 +75,7 @@ jobs:
       - name: Install deps
         run: npm ci --no-audit --no-fund
 
-      - name: Run enrichment
+      - name: Run enrichment (shard ${{ matrix.shard }})
         env:
           NEXT_PUBLIC_SUPABASE_URL:   ${{ secrets.UTILIZAI_SUPABASE_URL }}
           SUPABASE_SECRET_KEY:        ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
@@ -88,18 +91,25 @@ jobs:
           NODE_OPTIONS:               "--max-old-space-size=4096"
         run: |
           set -eu
-          CONCURRENCY="${{ github.event.inputs.concurrency || '5' }}"
+          CONCURRENCY="${{ github.event.inputs.concurrency || '8' }}"
           LIMIT="${{ github.event.inputs.limit || '99999' }}"
+          TOTAL_SHARDS="${{ github.event.inputs.total_shards || '4' }}"
+          SHARD="${{ matrix.shard }}"
           CATEGORY="${{ github.event.inputs.category || '' }}"
-          ARGS="--concurrency ${CONCURRENCY} --limit ${LIMIT}"
+          ARGS="--concurrency ${CONCURRENCY} --limit ${LIMIT} --shard ${SHARD} --total-shards ${TOTAL_SHARDS}"
           if [ -n "${CATEGORY}" ]; then
             ARGS="${ARGS} --category ${CATEGORY}"
           fi
           echo "Starting enrich-thin-images.ts ${ARGS}"
           npx tsx scripts/enrich-thin-images.ts ${ARGS}
 
-      - name: Summary
-        if: always()
+  summary:
+    name: Coverage summary
+    runs-on: ubuntu-latest
+    needs: enrich
+    if: always()
+    steps:
+      - name: Report enrichment coverage
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.UTILIZAI_SUPABASE_URL }}
           SUPABASE_SECRET_KEY:      ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
@@ -117,7 +127,7 @@ jobs:
             -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
             -H "Prefer: count=exact" \
             -H "Range: 0-0" -I 2>/dev/null | grep -i 'content-range' | awk -F'/' '{print $2}' | tr -d '\r')
-          echo "## UtilizAí — Enrich Images" >> $GITHUB_STEP_SUMMARY
+          echo "## UtilizAí — Enrich Images (Matrix 4 shards)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
           echo "- **Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
