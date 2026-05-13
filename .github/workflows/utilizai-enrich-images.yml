@@ -1,0 +1,124 @@
+# UtilizAí — Enrichment de imagens (SEO thin content fix)
+#
+# Contexto: ~24k imagens editoriais publicadas tinham description curta (<300 chars),
+# classificadas como "thin content" no GSC (5179 páginas Detectada não indexada).
+# Este workflow re-escreve `description_pt/en` em Markdown com seções:
+#   - Lead (1-2 frases pro meta description)
+#   - Sobre o tema (3-4 parágrafos)
+#   - Perguntas frequentes (3 Q&A)
+# Total ~350-500 palavras únicas por imagem.
+#
+# Persistência: tabela `images` (Supabase). Idempotente, skipa quem já tem
+# description_pt > 300 chars.
+#
+# Schedule: a cada 5h (offset 45min em relação a enrich-questions pra não competir
+# pelo TPM da DeepSeek). Cada run pega quantos couber em 350 min.
+#
+# Secrets esperados (configurar em actions-engine):
+#   REPO_PAT                              : PAT pra checkout do RenatoPassos1/UtilizAi
+#   UTILIZAI_DEEPSEEK_API_KEY             : DeepSeek (primary)
+#   UTILIZAI_GROQ_API_KEY[_2-5]           : Groq keys rotativas (fallback)
+#   UTILIZAI_SUPABASE_URL                 : https://<ref>.supabase.co
+#   UTILIZAI_SUPABASE_SERVICE_ROLE_KEY    : service_role key
+
+name: "UtilizAí: Enrich Images (SEO)"
+
+on:
+  schedule:
+    - cron: '45 */5 * * *'
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: "Workers paralelos (default 5)"
+        required: false
+        default: "5"
+      limit:
+        description: "Limite máximo de itens processados (default 99999)"
+        required: false
+        default: "99999"
+      category:
+        description: "Filtrar por categoria (opcional)"
+        required: false
+        default: ""
+
+concurrency:
+  group: utilizai-enrich-images
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  enrich:
+    name: Enrich images description
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout UtilizAi (private)
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/UtilizAi
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Run enrichment
+        env:
+          NEXT_PUBLIC_SUPABASE_URL:   ${{ secrets.UTILIZAI_SUPABASE_URL }}
+          SUPABASE_SECRET_KEY:        ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
+          DEEPSEEK_API_KEY:           ${{ secrets.UTILIZAI_DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL:          https://api.deepseek.com
+          DEEPSEEK_MODEL:             deepseek-v4-flash
+          GROQ_API_KEY:               ${{ secrets.UTILIZAI_GROQ_API_KEY }}
+          GROQ_API_KEY_2:             ${{ secrets.UTILIZAI_GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3:             ${{ secrets.UTILIZAI_GROQ_API_KEY_3 }}
+          GROQ_API_KEY_4:             ${{ secrets.UTILIZAI_GROQ_API_KEY_4 }}
+          GROQ_API_KEY_5:             ${{ secrets.UTILIZAI_GROQ_API_KEY_5 }}
+          GROQ_MODELS:                "meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,llama-3.3-70b-versatile,allam-2-7b"
+          NODE_OPTIONS:               "--max-old-space-size=4096"
+        run: |
+          set -eu
+          CONCURRENCY="${{ github.event.inputs.concurrency || '5' }}"
+          LIMIT="${{ github.event.inputs.limit || '99999' }}"
+          CATEGORY="${{ github.event.inputs.category || '' }}"
+          ARGS="--concurrency ${CONCURRENCY} --limit ${LIMIT}"
+          if [ -n "${CATEGORY}" ]; then
+            ARGS="${ARGS} --category ${CATEGORY}"
+          fi
+          echo "Starting enrich-thin-images.ts ${ARGS}"
+          npx tsx scripts/enrich-thin-images.ts ${ARGS}
+
+      - name: Summary
+        if: always()
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.UTILIZAI_SUPABASE_URL }}
+          SUPABASE_SECRET_KEY:      ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set +e
+          ENRICHED=$(curl -sS \
+            "${NEXT_PUBLIC_SUPABASE_URL}/rest/v1/images?select=id&is_published=eq.true&description_pt=like.*Sobre%20o%20tema*" \
+            -H "apikey: ${SUPABASE_SECRET_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
+            -H "Prefer: count=exact" \
+            -H "Range: 0-0" -I 2>/dev/null | grep -i 'content-range' | awk -F'/' '{print $2}' | tr -d '\r')
+          TOTAL=$(curl -sS \
+            "${NEXT_PUBLIC_SUPABASE_URL}/rest/v1/images?select=id&is_published=eq.true" \
+            -H "apikey: ${SUPABASE_SECRET_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
+            -H "Prefer: count=exact" \
+            -H "Range: 0-0" -I 2>/dev/null | grep -i 'content-range' | awk -F'/' '{print $2}' | tr -d '\r')
+          echo "## UtilizAí — Enrich Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Enriched/Total:** \`${ENRICHED:-?}/${TOTAL:-?}\`" >> $GITHUB_STEP_SUMMARY
