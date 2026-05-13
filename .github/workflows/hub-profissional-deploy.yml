@@ -52,7 +52,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.REPO_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build metadata
         id: meta
