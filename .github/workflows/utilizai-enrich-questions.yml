@@ -1,0 +1,116 @@
+# UtilizAí — Enrichment de questões (SEO thin content fix)
+#
+# Contexto: ~10.5k questões publicadas tinham 119 palavras médias, classificadas
+# como "thin content" no GSC. Este workflow enriquece `metadata.seo_intro_pt/en`,
+# `seo_topics_pt/en`, `seo_faq_pt/en` e (se faltar) `explanation` via LLM.
+#
+# Persistência: tabela `questions` (Supabase). Sem filesystem stateful, idempotente:
+# pode re-rodar quantas vezes quiser, skipa quem já tem metadata.seo_intro_pt > 200 chars.
+#
+# Schedule: a cada 5h. Cada run processa quanto couber em 350 min (5h50m de timeout).
+# Backoff de Groq + rotação multi-modelo + DeepSeek primary cabem por 5h e idempotência
+# garante continuação na próxima run.
+#
+# Secrets esperados (configurar em actions-engine, Settings, Secrets and variables, Actions):
+#   REPO_PAT                              : PAT pra checkout do RenatoPassos1/UtilizAi
+#   UTILIZAI_DEEPSEEK_API_KEY             : DeepSeek (primary, deepseek-v4-flash)
+#   UTILIZAI_GROQ_API_KEY                 : Groq key 1 (fallback)
+#   UTILIZAI_GROQ_API_KEY_2               : Groq key 2 (round-robin)
+#   UTILIZAI_GROQ_API_KEY_3               : Groq key 3
+#   UTILIZAI_GROQ_API_KEY_4               : Groq key 4
+#   UTILIZAI_GROQ_API_KEY_5               : Groq key 5
+#   UTILIZAI_SUPABASE_URL                 : https://<ref>.supabase.co
+#   UTILIZAI_SUPABASE_SERVICE_ROLE_KEY    : service_role key (bypass RLS)
+
+name: "UtilizAí: Enrich Questions (SEO)"
+
+on:
+  schedule:
+    - cron: '15 */5 * * *'
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: "Workers paralelos (default 5)"
+        required: false
+        default: "5"
+      limit:
+        description: "Limite máximo de itens processados (default 99999)"
+        required: false
+        default: "99999"
+
+concurrency:
+  group: utilizai-enrich-questions
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  enrich:
+    name: Enrich questions metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout UtilizAi (private)
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/UtilizAi
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Run enrichment
+        env:
+          NEXT_PUBLIC_SUPABASE_URL:   ${{ secrets.UTILIZAI_SUPABASE_URL }}
+          SUPABASE_SECRET_KEY:        ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
+          DEEPSEEK_API_KEY:           ${{ secrets.UTILIZAI_DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL:          https://api.deepseek.com
+          DEEPSEEK_MODEL:             deepseek-v4-flash
+          GROQ_API_KEY:               ${{ secrets.UTILIZAI_GROQ_API_KEY }}
+          GROQ_API_KEY_2:             ${{ secrets.UTILIZAI_GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3:             ${{ secrets.UTILIZAI_GROQ_API_KEY_3 }}
+          GROQ_API_KEY_4:             ${{ secrets.UTILIZAI_GROQ_API_KEY_4 }}
+          GROQ_API_KEY_5:             ${{ secrets.UTILIZAI_GROQ_API_KEY_5 }}
+          GROQ_MODELS:                "meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,llama-3.3-70b-versatile,allam-2-7b"
+          NODE_OPTIONS:               "--max-old-space-size=4096"
+        run: |
+          set -eu
+          CONCURRENCY="${{ github.event.inputs.concurrency || '5' }}"
+          LIMIT="${{ github.event.inputs.limit || '99999' }}"
+          echo "Starting enrich-thin-questions.ts concurrency=${CONCURRENCY} limit=${LIMIT}"
+          npx tsx scripts/enrich-thin-questions.ts --concurrency "${CONCURRENCY}" --limit "${LIMIT}"
+
+      - name: Summary
+        if: always()
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.UTILIZAI_SUPABASE_URL }}
+          SUPABASE_SECRET_KEY:      ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set +e
+          ENRICHED=$(curl -sS \
+            "${NEXT_PUBLIC_SUPABASE_URL}/rest/v1/questions?select=id&status=eq.published&metadata->>seo_intro_pt=not.is.null" \
+            -H "apikey: ${SUPABASE_SECRET_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
+            -H "Prefer: count=exact" \
+            -H "Range: 0-0" -I 2>/dev/null | grep -i 'content-range' | awk -F'/' '{print $2}' | tr -d '\r')
+          TOTAL=$(curl -sS \
+            "${NEXT_PUBLIC_SUPABASE_URL}/rest/v1/questions?select=id&status=eq.published" \
+            -H "apikey: ${SUPABASE_SECRET_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
+            -H "Prefer: count=exact" \
+            -H "Range: 0-0" -I 2>/dev/null | grep -i 'content-range' | awk -F'/' '{print $2}' | tr -d '\r')
+          echo "## UtilizAí — Enrich Questions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Enriched/Total:** \`${ENRICHED:-?}/${TOTAL:-?}\`" >> $GITHUB_STEP_SUMMARY
