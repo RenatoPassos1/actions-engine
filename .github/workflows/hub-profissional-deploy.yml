@@ -1,0 +1,130 @@
+# Hub Profissional — Build & Deploy to Oracle VM
+# Clona repo privado, builda imagem arm64, push GHCR, pull+recreate na VM
+# Trigger: repository_dispatch (from hub-profissional repo) ou manual
+
+name: "Hub Profissional: Build & Deploy"
+
+on:
+  repository_dispatch:
+    types: [hub-profissional-deploy]
+  workflow_dispatch: {}
+
+concurrency:
+  group: hub-profissional-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: renatopassos1/hub-profissional
+
+jobs:
+  build-and-push:
+    name: Build & push arm64 image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    outputs:
+      sha_short: ${{ steps.shortsha.outputs.sha_short }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/hub-profissional
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Compute short SHA
+        id: shortsha
+        run: |
+          SHA=$(git rev-parse --short=7 HEAD)
+          echo "sha_short=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build & push image (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/arm64
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_SITE_URL=https://hubprofissional.com
+            NEXT_PUBLIC_SUPABASE_URL=https://lwhggvoqzwesbdljcikw.supabase.co
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.HUB_SUPABASE_ANON_KEY }}
+
+  deploy:
+    needs: build-and-push
+    name: Deploy to Oracle VM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull image + recreate container on VM
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} <<'REMOTE'
+          set -euo pipefail
+          cd /opt/hub-profissional
+          docker compose pull hub
+          docker compose up -d --remove-orphans hub
+          docker network connect evolution_default hub-profissional 2>/dev/null || true
+          echo "Aguardando container healthy..."
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' hub-profissional 2>/dev/null || echo starting)
+            if [ "$status" = "healthy" ]; then
+              echo "Container healthy."
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:3012/api/health
+          docker image prune -f --filter "until=24h" || true
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          echo "### Hub Profissional Deploy OK" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA:** ${{ needs.build-and-push.outputs.sha_short }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://hubprofissional.com" >> $GITHUB_STEP_SUMMARY
+          echo "- **VM:** Oracle ARM64 (claudia-oracle)" >> $GITHUB_STEP_SUMMARY
