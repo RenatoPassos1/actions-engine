@@ -122,6 +122,20 @@ jobs:
           fi
           REMOTE_ENV
 
+      - name: Debug env + compose on VM
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} <<'REMOTE_DEBUG'
+          set -e
+          cd /opt/hub-profissional
+          echo "=== .env keys ==="
+          grep -oE '^[A-Z_]+=' .env | sort -u
+          echo "=== docker-compose env_file references ==="
+          grep -nA1 'env_file' docker-compose.yml || echo "(no env_file)"
+          echo "=== environment section ==="
+          grep -nA20 'environment:' docker-compose.yml | head -40 || echo "(no environment)"
+          REMOTE_DEBUG
+
       - name: Pull image + recreate container on VM
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
