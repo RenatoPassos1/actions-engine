@@ -1,0 +1,92 @@
+# UtilizAí — Resubmit sitemaps no Google Search Console
+#
+# Usado após enrichment massivo (calc + images + questions) pra forcar re-crawl
+# das ~38k paginas atualizadas. Resubmit sinaliza ao Google que o conteudo mudou
+# e acelera saida de "Detectada nao indexada" pra "Indexada".
+#
+# Sitemaps:
+#   /sitemap.xml          (paginas gerais + calculadoras + questoes)
+#   /news-sitemap.xml     (noticias recentes)
+#   /image-sitemap.xml    (imagens)
+#
+# Trigger: workflow_dispatch manual.
+#
+# Secrets esperados:
+#   UTILIZAI_GSC_SA_JSON_BASE64  : Service Account JSON com siteFullUser em
+#                                  sc-domain:xn--utiliza-eza.com
+
+name: "UtilizAí: GSC Resubmit Sitemaps"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resubmit:
+    name: Resubmit 3 sitemaps
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install google-auth google-api-python-client
+
+      - name: Resubmit sitemaps
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.UTILIZAI_GSC_SA_JSON_BASE64 }}
+          SITE_URL: "sc-domain:xn--utiliza-eza.com"
+        run: |
+          python <<'PYEOF'
+          import base64, json, os, sys
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.errors import HttpError
+
+          raw = os.environ['GOOGLE_SERVICE_ACCOUNT_JSON_BASE64']
+          creds_dict = json.loads(base64.b64decode(raw).decode('utf-8'))
+          creds = service_account.Credentials.from_service_account_info(
+              creds_dict,
+              scopes=['https://www.googleapis.com/auth/webmasters']
+          )
+          service = build('searchconsole', 'v1', credentials=creds, cache_discovery=False)
+
+          SITE = os.environ['SITE_URL']
+          SITEMAPS = [
+              'https://xn--utiliza-eza.com/sitemap.xml',
+              'https://xn--utiliza-eza.com/news-sitemap.xml',
+              'https://xn--utiliza-eza.com/image-sitemap.xml',
+          ]
+
+          summary_lines = []
+          for sm in SITEMAPS:
+              try:
+                  service.sitemaps().submit(siteUrl=SITE, feedpath=sm).execute()
+                  print(f'[OK] Submitted: {sm}')
+                  summary_lines.append(f'- OK: {sm}')
+              except HttpError as e:
+                  err = e.resp.status if hasattr(e, 'resp') else 'unknown'
+                  print(f'[ERR {err}] {sm}: {e}')
+                  summary_lines.append(f'- ERR {err}: {sm}')
+
+          # Verifica estado pos-submit
+          print()
+          print('=== Sitemap state ===')
+          state = service.sitemaps().list(siteUrl=SITE).execute()
+          for sm in state.get('sitemap', []):
+              print(f"  {sm['path']}: lastSubmitted={sm.get('lastSubmitted','?')}, isPending={sm.get('isPending','?')}, contents={sm.get('contents',[])}")
+
+          # Write to step summary
+          summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary_path:
+              with open(summary_path, 'a') as f:
+                  f.write('## UtilizAí GSC Resubmit Sitemaps\n\n')
+                  for line in summary_lines:
+                      f.write(line + '\n')
+          PYEOF
