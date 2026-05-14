@@ -122,19 +122,27 @@ jobs:
           fi
           REMOTE_ENV
 
-      - name: Debug env + compose on VM
+      - name: Patch docker-compose with new env vars
         run: |
+          # docker-compose.yml lista cada env do container explicitamente em
+          # environment:. Toda env nova precisa ser adicionada la, senao o
+          # container nao recebe (mesmo que .env tenha a key). Idempotente
+          # via grep -q antes do sed -i.
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} <<'REMOTE_DEBUG'
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} <<'REMOTE_COMPOSE'
           set -e
           cd /opt/hub-profissional
-          echo "=== .env keys ==="
-          grep -oE '^[A-Z_]+=' .env | sort -u
-          echo "=== docker-compose env_file references ==="
-          grep -nA1 'env_file' docker-compose.yml || echo "(no env_file)"
-          echo "=== environment section ==="
-          grep -nA20 'environment:' docker-compose.yml | head -40 || echo "(no environment)"
-          REMOTE_DEBUG
+          NEEDS=(HUB_INVITE_TASK_TOKEN VAPID_PRIVATE_KEY)
+          ANCHOR='FOUNDER_DISPLAY_BOOST'
+          for var in "${NEEDS[@]}"; do
+            if ! grep -qE "^[[:space:]]+- ${var}=" docker-compose.yml; then
+              sed -i "/${ANCHOR}/a\      - ${var}=\${${var}}" docker-compose.yml
+              echo "[compose-patch] adicionado ${var}"
+            else
+              echo "[compose-patch] ${var} ja presente"
+            fi
+          done
+          REMOTE_COMPOSE
 
       - name: Pull image + recreate container on VM
         run: |
