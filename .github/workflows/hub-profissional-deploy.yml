@@ -97,26 +97,30 @@ jobs:
       - name: Sync server env vars to VM
         env:
           HUB_VAPID_PRIVATE_KEY: ${{ secrets.HUB_VAPID_PRIVATE_KEY }}
+          HUB_INVITE_TASK_TOKEN: ${{ secrets.HUB_INVITE_TASK_TOKEN }}
         run: |
           # Atualiza chaves managed-by-CI no /opt/hub-profissional/.env da VM.
           # Cada upsert remove a linha existente (se houver) e adiciona a nova,
-          # garantindo idempotencia. Variavel chega via env do step, nao pelo
+          # garantindo idempotencia. Variaveis chegam via env do step, nao pelo
           # comando, pra nao vazar em ps aux do remote.
-          if [ -n "$HUB_VAPID_PRIVATE_KEY" ]; then
-            ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-              ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} \
-              "VAPID_PRIVATE_KEY=\"$HUB_VAPID_PRIVATE_KEY\" bash -s" <<'REMOTE_ENV'
-            set -e
-            cd /opt/hub-profissional
-            touch .env
-            chmod 600 .env
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} \
+            "VAPID_PRIVATE_KEY=\"$HUB_VAPID_PRIVATE_KEY\" INVITE_TASK_TOKEN=\"$HUB_INVITE_TASK_TOKEN\" bash -s" <<'REMOTE_ENV'
+          set -e
+          cd /opt/hub-profissional
+          touch .env
+          chmod 600 .env
+          if [ -n "$VAPID_PRIVATE_KEY" ]; then
             sed -i '/^VAPID_PRIVATE_KEY=/d' .env
             printf 'VAPID_PRIVATE_KEY=%s\n' "$VAPID_PRIVATE_KEY" >> .env
-            echo "[env-sync] VAPID_PRIVATE_KEY atualizado em .env"
-          REMOTE_ENV
-          else
-            echo "[env-sync] HUB_VAPID_PRIVATE_KEY vazio, pulando."
+            echo "[env-sync] VAPID_PRIVATE_KEY atualizado"
           fi
+          if [ -n "$INVITE_TASK_TOKEN" ]; then
+            sed -i '/^HUB_INVITE_TASK_TOKEN=/d' .env
+            printf 'HUB_INVITE_TASK_TOKEN=%s\n' "$INVITE_TASK_TOKEN" >> .env
+            echo "[env-sync] HUB_INVITE_TASK_TOKEN atualizado"
+          fi
+          REMOTE_ENV
 
       - name: Pull image + recreate container on VM
         run: |
