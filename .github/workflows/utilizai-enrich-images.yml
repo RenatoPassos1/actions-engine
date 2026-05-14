@@ -32,9 +32,9 @@ on:
         required: false
         default: "99999"
       total_shards:
-        description: "Total de shards paralelos (default 4)"
+        description: "Total de shards paralelos (default 8)"
         required: false
-        default: "4"
+        default: "8"
       category:
         description: "Filtrar por categoria (opcional)"
         required: false
@@ -49,13 +49,13 @@ permissions:
 
 jobs:
   enrich:
-    name: Shard ${{ matrix.shard }}/${{ github.event.inputs.total_shards || '4' }}
+    name: Shard ${{ matrix.shard }}/${{ github.event.inputs.total_shards || '8' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
 
     steps:
       - name: Checkout UtilizAi (private)
@@ -93,7 +93,7 @@ jobs:
           set -eu
           CONCURRENCY="${{ github.event.inputs.concurrency || '8' }}"
           LIMIT="${{ github.event.inputs.limit || '99999' }}"
-          TOTAL_SHARDS="${{ github.event.inputs.total_shards || '4' }}"
+          TOTAL_SHARDS="${{ github.event.inputs.total_shards || '8' }}"
           SHARD="${{ matrix.shard }}"
           CATEGORY="${{ github.event.inputs.category || '' }}"
           ARGS="--concurrency ${CONCURRENCY} --limit ${LIMIT} --shard ${SHARD} --total-shards ${TOTAL_SHARDS}"
@@ -127,7 +127,7 @@ jobs:
             -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
             -H "Prefer: count=exact" \
             -H "Range: 0-0" -I 2>/dev/null | grep -i 'content-range' | awk -F'/' '{print $2}' | tr -d '\r')
-          echo "## UtilizAí — Enrich Images (Matrix 4 shards)" >> $GITHUB_STEP_SUMMARY
+          echo "## UtilizAí — Enrich Images (Matrix 8 shards)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
           echo "- **Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
