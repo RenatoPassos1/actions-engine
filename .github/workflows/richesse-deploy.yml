@@ -66,11 +66,19 @@ jobs:
 
       - name: Setup SSH
         if: steps.compare.outputs.skip == 'false'
+        env:
+          SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.ORACLE_SSH_KEY }}" | base64 -d > ~/.ssh/oracle_key
+          # Fix: echo trunca em newlines, secret base64 multi-linha quebrava.
+          if printf '%s' "$SSH_KEY_B64" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$SSH_KEY_B64" > ~/.ssh/oracle_key
+          else
+            printf '%s' "$SSH_KEY_B64" | base64 -d > ~/.ssh/oracle_key
+          fi
           chmod 600 ~/.ssh/oracle_key
-          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy to Oracle (clone-or-pull, rsync HTMLs + site.js + styles.css)
         if: steps.compare.outputs.skip == 'false'
