@@ -1,0 +1,130 @@
+# LeilôAI. Watcher de commits no leilao-watch (repo privado)
+#
+# Roda em cron a cada 3 min. Quando detecta novo commit no branch
+# feat/landing, dispara automaticamente o workflow leiloai-deploy.yml.
+#
+# Por que polling em vez de webhook?
+#   - leilao-watch e PRIVADO. Pra rodar GitHub Actions nele a cada push
+#     consumiria minutos do plano privado.
+#   - actions-engine e PUBLICO. Minutos ilimitados.
+#
+# Estado: ultima SHA deployada e mantida em
+# .github/state/leiloai-last-deployed-sha.txt no proprio actions-engine.
+# Pra primeira execucao (arquivo nao existe), so registra a SHA atual
+# sem disparar deploy (evita deploy desnecessario na ativacao).
+
+name: "LeilôAI: Watcher push -> deploy"
+
+on:
+  schedule:
+    - cron: "*/3 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: leiloai-deploy-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Detecta novo commit e dispara deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout actions-engine (pra ler state file)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.REPO_PAT }}
+
+      - name: Pega SHA atual do feat/landing
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+        run: |
+          set -eu
+          SHA=$(curl -sS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/RenatoPassos1/leilao-watch/branches/feat/landing" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin).get('commit',{}).get('sha') or '')")
+          if [ -z "$SHA" ]; then
+            echo "::error::Nao consegui pegar SHA do branch feat/landing"
+            exit 1
+          fi
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Current HEAD: $SHA"
+
+      - name: Pega ultima SHA deployada (state file)
+        id: last
+        run: |
+          set -eu
+          STATE_FILE=".github/state/leiloai-last-deployed-sha.txt"
+          mkdir -p .github/state
+          if [ -f "$STATE_FILE" ]; then
+            LAST=$(cat "$STATE_FILE" | tr -d '[:space:]')
+          else
+            LAST=""
+          fi
+          echo "last=$LAST" >> $GITHUB_OUTPUT
+          echo "Last deployed: ${LAST:-<none>}"
+
+      - name: Compara SHAs
+        id: cmp
+        run: |
+          set -eu
+          HEAD='${{ steps.head.outputs.sha }}'
+          LAST='${{ steps.last.outputs.last }}'
+          if [ -z "$LAST" ]; then
+            echo "action=record" >> $GITHUB_OUTPUT
+            echo "Primeira execucao, vai apenas registrar SHA sem deployar"
+          elif [ "$HEAD" = "$LAST" ]; then
+            echo "action=skip" >> $GITHUB_OUTPUT
+            echo "SHA nao mudou. Skip."
+          else
+            echo "action=deploy" >> $GITHUB_OUTPUT
+            echo "Novo commit. Dispara deploy."
+          fi
+
+      - name: Dispara deploy via repository_dispatch
+        if: steps.cmp.outputs.action == 'deploy'
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          set -eu
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/RenatoPassos1/actions-engine/dispatches" \
+            -d "{
+              \"event_type\":\"leiloai-deploy\",
+              \"client_payload\":{\"ref\":\"$HEAD_SHA\"}
+            }"
+          echo "✓ Dispatched leiloai-deploy com ref=$HEAD_SHA"
+
+      - name: Atualizar state file e commit
+        if: steps.cmp.outputs.action != 'skip'
+        env:
+          NEW_SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          set -eu
+          STATE_FILE=".github/state/leiloai-last-deployed-sha.txt"
+          mkdir -p .github/state
+          echo "$NEW_SHA" > "$STATE_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$STATE_FILE"
+          git commit -m "chore(leiloai): record deployed SHA $NEW_SHA" || echo "Sem mudancas pra commitar"
+          git push
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### LeilôAI. Deploy watcher"
+            echo "- Data: $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')"
+            echo "- HEAD feat/landing: \`${{ steps.head.outputs.sha }}\`"
+            echo "- Ultimo deployado: \`${{ steps.last.outputs.last || 'none' }}\`"
+            echo "- Acao: \`${{ steps.cmp.outputs.action }}\`"
+          } >> $GITHUB_STEP_SUMMARY

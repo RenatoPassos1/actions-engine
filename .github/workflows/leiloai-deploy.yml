@@ -1,15 +1,25 @@
-# LeilôAI — Deploy Frontend (Vercel) + Workers Cloudflare
-# Clona o repo privado, build Next.js, publica na Vercel prod.
-# Em paralelo, se o push mexeu em services/**, reimplanta os Workers.
-# Trigger: repository_dispatch (webhook do repo) ou workflow_dispatch (manual).
+# LeilôAI. Deploy Frontend (Vercel API gitSource) + Workers Cloudflare
 #
-# Secrets necessários neste repo (actions-engine):
-#   REPO_PAT                    — PAT com acesso ao leilao-watch
-#   VERCEL_TOKEN                — Vercel CLI token
-#   VERCEL_ORG_ID               — team_gdzcT5wqd4wpREVUBPN03nZX
-#   LEILOAI_VERCEL_PROJECT_ID   — prj_yz7dn0NbeLAKRgAkp09nsTD8kRi1
-#   LEILOAI_CF_TOKEN            — token Cloudflare com Workers Edit (Edit Cloudflare Workers template)
-#   LEILOAI_CF_ACCOUNT          — dbb3f03c84752fc3d9cf0e9214607e02
+# IMPORTANTE (regra global VercelHobbyDeployBypass):
+# Vercel Hobby plan bloqueia (BLOCKED) deploys via webhook GitHub quando o
+# commit author nao bate com o team owner. Solucao: disparar via API
+# gitSource com token do team owner (creator = owner -> nunca BLOCKED).
+#
+# O webhook nativo do GitHub esta DESATIVADO em apps/web/vercel.json
+# (deploymentEnabled=false) pra impedir builds duplicados (1 BLOCKED + 1 READY).
+#
+# Triggers:
+#   - workflow_dispatch (manual via UI ou gh)
+#   - repository_dispatch (event leiloai-deploy)
+#
+# Secrets necessarios (set via gh secret set):
+#   REPO_PAT                    PAT com acesso ao leilao-watch (read-only)
+#   LEILOAI_VERCEL_TOKEN        Token do team owner consultorias-bilionaria
+#   LEILOAI_VERCEL_TEAM_ID      team_8adVzPuPW8kKLkQGcCRnuUfK
+#   LEILOAI_VERCEL_PROJECT_ID   prj_tA5NKBHgA8FHusOxnIBepZe0tppM
+#   LEILOAI_GH_REPO_ID          1218610930
+#   LEILOAI_CF_TOKEN            Cloudflare Workers Edit token
+#   LEILOAI_CF_ACCOUNT          dbb3f03c84752fc3d9cf0e9214607e02
 
 name: "LeilôAI: Deploy"
 
@@ -21,12 +31,16 @@ on:
       target:
         description: "Deploy target"
         required: true
-        default: "all"
+        default: "frontend"
         type: choice
         options:
-          - all
           - frontend
           - workers
+          - all
+      ref:
+        description: "Branch ou SHA pra deployar"
+        required: false
+        default: "feat/landing"
 
 concurrency:
   group: leiloai-deploy
@@ -36,67 +50,106 @@ jobs:
   frontend:
     if: >-
       github.event_name == 'repository_dispatch' ||
-      github.event.inputs.target == 'all' ||
-      github.event.inputs.target == 'frontend'
-    name: Deploy Frontend (Vercel)
+      github.event.inputs.target == 'frontend' ||
+      github.event.inputs.target == 'all'
+    name: Deploy Frontend (Vercel API gitSource)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    env:
+      VERCEL_TOKEN: ${{ secrets.LEILOAI_VERCEL_TOKEN }}
+      VERCEL_TEAM_ID: ${{ secrets.LEILOAI_VERCEL_TEAM_ID }}
+      VERCEL_REPO_ID: ${{ secrets.LEILOAI_GH_REPO_ID }}
+
     steps:
-      - name: Checkout leilao-watch
-        uses: actions/checkout@v4
-        with:
-          repository: RenatoPassos1/leilao-watch
-          token: ${{ secrets.REPO_PAT }}
-          ref: feat/landing
-          fetch-depth: 1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: apps/web/package-lock.json
-
-      - name: Install Vercel CLI
-        run: npm install -g vercel@latest
-
-      - name: Link Vercel project
-        working-directory: apps/web
-        run: |
-          mkdir -p .vercel
-          echo '{"orgId":"${{ secrets.VERCEL_ORG_ID }}","projectId":"${{ secrets.LEILOAI_VERCEL_PROJECT_ID }}"}' > .vercel/project.json
-
-      - name: Deploy to Vercel Production
-        id: vercel
-        working-directory: apps/web
-        run: |
-          vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tee /tmp/deploy.log
-          DEPLOY_URL=$(grep -oP 'https://[^\s]+\.vercel\.app' /tmp/deploy.log | tail -1)
-          echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_OUTPUT
-          echo "Deploy URL: $DEPLOY_URL"
-
-      - name: Smoke test
+      - name: Resolve ref
+        id: ref
         run: |
           set -eu
-          echo "Checando leiloai.com..."
-          curl -sI https://leiloai.com | grep -i "HTTP/"
-          echo "Checando /ferramentas..."
-          curl -sI https://leiloai.com/ferramentas | grep -i "HTTP/"
+          REF="${{ github.event.inputs.ref || github.event.client_payload.ref || 'feat/landing' }}"
+          echo "ref=$REF" >> $GITHUB_OUTPUT
+          echo "Deploying ref: $REF"
+
+      - name: Trigger Vercel deploy via API gitSource
+        id: vercel
+        run: |
+          set -eu
+          REF='${{ steps.ref.outputs.ref }}'
+
+          RESP=$(curl -sS -X POST \
+            "https://api.vercel.com/v13/deployments?teamId=$VERCEL_TEAM_ID" \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\":\"leiloai\",
+              \"gitSource\":{\"type\":\"github\",\"repoId\":${VERCEL_REPO_ID},\"ref\":\"$REF\"},
+              \"target\":\"production\"
+            }")
+
+          DEPLOY_ID=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id') or '')")
+          CREATOR=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('creator',{}).get('username') or '')")
+          ERR=$(echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('error') or '')")
+
+          if [ -z "$DEPLOY_ID" ]; then
+            echo "::error::Falha ao criar deploy: $ERR"
+            echo "Resposta: $RESP"
+            exit 1
+          fi
+
+          echo "deploy_id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "creator=$CREATOR" >> $GITHUB_OUTPUT
+          echo "✓ Deploy criado: $DEPLOY_ID (creator: $CREATOR)"
+
+      - name: Aguardar deploy READY
+        id: wait
+        run: |
+          set -eu
+          DEPLOY_ID='${{ steps.vercel.outputs.deploy_id }}'
+          for i in $(seq 1 30); do
+            STATE=$(curl -sS \
+              -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v13/deployments/$DEPLOY_ID?teamId=$VERCEL_TEAM_ID" \
+              | python3 -c "import sys,json;print(json.load(sys.stdin).get('readyState') or 'UNKNOWN')")
+            echo "$i/30: state=$STATE"
+            case "$STATE" in
+              READY)
+                echo "state=READY" >> $GITHUB_OUTPUT
+                exit 0 ;;
+              ERROR|CANCELED|BLOCKED)
+                echo "state=$STATE" >> $GITHUB_OUTPUT
+                echo "::error::Deploy nao ficou READY: $STATE"
+                exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "::warning::Timeout aguardando deploy"
+          echo "state=TIMEOUT" >> $GITHUB_OUTPUT
+
+      - name: Smoke test
+        if: steps.wait.outputs.state == 'READY'
+        run: |
+          set -eu
+          CODE=$(curl -sI -o /dev/null -w '%{http_code}' https://leiloai.com/)
+          echo "leiloai.com: HTTP $CODE"
+          test "$CODE" = "200" || (echo "::error::Smoke test falhou"; exit 1)
 
       - name: Summary
         if: always()
         run: |
-          echo "### LeilôAI — Frontend deploy" >> $GITHUB_STEP_SUMMARY
-          echo "- **Data:** $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Site:** https://leiloai.com" >> $GITHUB_STEP_SUMMARY
-          echo "- **Deploy URL:** ${{ steps.vercel.outputs.DEPLOY_URL }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### LeilôAI. Frontend deploy"
+            echo "- Data: $(TZ='America/Sao_Paulo' date +'%d/%m/%Y %H:%M BRT')"
+            echo "- Ref: \`${{ steps.ref.outputs.ref }}\`"
+            echo "- Deploy ID: \`${{ steps.vercel.outputs.deploy_id }}\`"
+            echo "- Creator: \`${{ steps.vercel.outputs.creator }}\`"
+            echo "- State: \`${{ steps.wait.outputs.state }}\`"
+            echo "- Site: https://leiloai.com"
+          } >> $GITHUB_STEP_SUMMARY
 
   workers:
     if: >-
-      github.event_name == 'repository_dispatch' ||
-      github.event.inputs.target == 'all' ||
-      github.event.inputs.target == 'workers'
+      github.event.inputs.target == 'workers' ||
+      github.event.inputs.target == 'all'
     name: Deploy Workers Cloudflare
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -104,26 +157,26 @@ jobs:
       fail-fast: false
       matrix:
         worker:
-          - { dir: "services/ingestion/caixa",       name: "caixa" }
-          - { dir: "services/ingestion/detran",      name: "detran" }
-          - { dir: "services/ingestion/bb",          name: "bb" }
-          - { dir: "services/ingestion/receita",     name: "receita" }
-          - { dir: "services/ingestion/dou",         name: "dou" }
-          - { dir: "services/ingestion/doe",         name: "doe" }
-          - { dir: "services/ingestion/djen",        name: "djen" }
-          - { dir: "services/ingestion/datajud",     name: "datajud" }
-          - { dir: "services/ingestion/bancos",       name: "bancos" }
-          - { dir: "services/ingestion/agregadores",  name: "agregadores" }
-          - { dir: "services/ingestion/marketplaces", name: "marketplaces" }
-          - { dir: "services/ingestion/rental",       name: "rental" }
-          - { dir: "services/ingestion/inss",         name: "inss" }
-          - { dir: "services/ingestion/seuimovelbb",  name: "seuimovelbb" }
-          - { dir: "services/ingestion/spyleiloes",   name: "spyleiloes" }
+          - { dir: "services/ingestion/caixa",          name: "caixa" }
+          - { dir: "services/ingestion/detran",         name: "detran" }
+          - { dir: "services/ingestion/bb",             name: "bb" }
+          - { dir: "services/ingestion/receita",        name: "receita" }
+          - { dir: "services/ingestion/dou",            name: "dou" }
+          - { dir: "services/ingestion/doe",            name: "doe" }
+          - { dir: "services/ingestion/djen",           name: "djen" }
+          - { dir: "services/ingestion/datajud",        name: "datajud" }
+          - { dir: "services/ingestion/bancos",         name: "bancos" }
+          - { dir: "services/ingestion/agregadores",    name: "agregadores" }
+          - { dir: "services/ingestion/marketplaces",   name: "marketplaces" }
+          - { dir: "services/ingestion/rental",         name: "rental" }
+          - { dir: "services/ingestion/inss",           name: "inss" }
+          - { dir: "services/ingestion/seuimovelbb",    name: "seuimovelbb" }
+          - { dir: "services/ingestion/spyleiloes",     name: "spyleiloes" }
           - { dir: "services/ingestion/querido-diario", name: "querido-diario" }
-          - { dir: "services/enrichment",             name: "enrichment" }
-          - { dir: "services/enrichment-ia",          name: "enrichment-ia" }
-          - { dir: "services/rate-limit",             name: "rate-limit" }
-          - { dir: "services/orchestrator",           name: "orchestrator" }
+          - { dir: "services/enrichment",               name: "enrichment" }
+          - { dir: "services/enrichment-ia",            name: "enrichment-ia" }
+          - { dir: "services/rate-limit",               name: "rate-limit" }
+          - { dir: "services/orchestrator",             name: "orchestrator" }
 
     steps:
       - name: Checkout leilao-watch
@@ -147,8 +200,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.LEILOAI_CF_ACCOUNT }}
-        run: |
-          wrangler deploy
+        run: wrangler deploy
 
       - name: Summary
         if: always()
