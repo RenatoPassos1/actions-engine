@@ -1,0 +1,53 @@
+# UtilizAí - Diagnostico de indexacao GSC
+#
+# Amostra URLs por tipo de pagina e inspeciona via urlInspection API pra
+# identificar PADROES de falha de indexacao (Crawled not indexed, Discovered
+# not indexed, redirect, canonical mismatch, etc).
+#
+# Trigger: manual. Quota urlInspection 2000/dia, amostra ~150 URLs.
+#
+# Secrets:
+#   REPO_PAT, UTILIZAI_GSC_SA_JSON_BASE64
+
+name: "UtilizAí: GSC Diagnose"
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample_per_type:
+        description: "URLs amostradas por tipo de pagina"
+        required: false
+        default: "12"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Inspect sample + group failures
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout UtilizAi (private)
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/UtilizAi
+          token: ${{ secrets.REPO_PAT }}
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install google-auth google-api-python-client
+
+      - name: Run diagnose
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.UTILIZAI_GSC_SA_JSON_BASE64 }}
+          GSC_SITE_URL: "sc-domain:xn--utiliza-eza.com"
+          SAMPLE_PER_TYPE: ${{ github.event.inputs.sample_per_type || '12' }}
+        run: python scripts/gsc-diagnose/diagnose.py
