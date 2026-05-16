@@ -86,25 +86,32 @@ jobs:
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
+          # set -e: se 'docker build' falhar, aborta AQUI sem tocar no
+          # container atual (continua servindo a versao antiga) em vez de
+          # cair na cadeia &&/|| antiga que pulava o stop e colidia no
+          # 'docker run' (name already in use) ou deployava imagem stale.
+          # prune -af sem filtro until: libera TODO cache/dangling, mata o
+          # ENOSPC. docker rm -f: remove container mesmo rodando.
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
             "$ORACLE_USER@$ORACLE_HOST" \
-            'cd /home/ubuntu/apps/leiloai && \
-             git fetch origin && \
-             git reset --hard origin/feat/landing && \
-             sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" apps/web/.env.production && \
-             python3 -c "import sys; p=sys.argv[1]; d=open(p,\"rb\").read(); n=d.count(bytes([0x5C,0x6E,0x0A])); d=d.replace(bytes([0x5C,0x6E,0x0A]),bytes([0x0A])); open(p,\"wb\").write(d); print(f\"strip backslash-n literal: {n}\")" apps/web/.env.production && \
-             docker builder prune -af --filter "until=72h" 2>&1 | tail -3 && \
-             docker image prune -af --filter "until=72h" 2>&1 | tail -3 && \
-             docker build -t leiloai-web:new . && \
-             docker stop leiloai-web 2>/dev/null || true && \
-             docker rm leiloai-web 2>/dev/null || true && \
-             docker tag leiloai-web:new leiloai-web:latest && \
+            'set -e; \
+             cd /home/ubuntu/apps/leiloai; \
+             git fetch origin; \
+             git reset --hard origin/feat/landing; \
+             sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" apps/web/.env.production; \
+             python3 -c "import sys; p=sys.argv[1]; d=open(p,\"rb\").read(); n=d.count(bytes([0x5C,0x6E,0x0A])); d=d.replace(bytes([0x5C,0x6E,0x0A]),bytes([0x0A])); open(p,\"wb\").write(d); print(f\"strip backslash-n literal: {n}\")" apps/web/.env.production; \
+             docker builder prune -af 2>&1 | tail -3 || true; \
+             docker image prune -af 2>&1 | tail -3 || true; \
+             docker build -t leiloai-web:new .; \
+             docker stop leiloai-web 2>/dev/null || true; \
+             docker rm -f leiloai-web 2>/dev/null || true; \
+             docker tag leiloai-web:new leiloai-web:latest; \
              docker run -d --name leiloai-web --restart unless-stopped \
                --env-file /home/ubuntu/apps/leiloai/apps/web/.env.production \
-               -p 127.0.0.1:3010:3010 leiloai-web:latest && \
-             sleep 8 && \
-             docker logs leiloai-web 2>&1 | tail -20 && \
-             curl -fsS http://127.0.0.1:3010/ -o /dev/null -w "OK %{http_code}\n" && \
+               -p 127.0.0.1:3010:3010 leiloai-web:latest; \
+             sleep 8; \
+             docker logs leiloai-web 2>&1 | tail -20; \
+             curl -fsS http://127.0.0.1:3010/ -o /dev/null -w "OK %{http_code}\n"; \
              df -h / | tail -1'
 
       - name: Save deployed SHA

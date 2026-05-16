@@ -87,25 +87,32 @@ jobs:
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
+          # set -e: se 'docker build' falhar, aborta AQUI sem tocar no
+          # container atual (continua servindo a versao antiga) em vez de
+          # cair na cadeia &&/|| antiga que pulava o stop e colidia no
+          # 'docker run' ou deployava imagem stale.
+          # prune -af sem filtro until: libera TODO cache/dangling, mata o
+          # ENOSPC (causa real das falhas). docker rm -f: remove mesmo rodando.
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
             "$ORACLE_USER@$ORACLE_HOST" \
-            'cd /home/ubuntu/apps/utilizai && \
-             git fetch origin && \
-             git reset --hard origin/main && \
-             sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" .env.production && \
-             python3 -c "import sys; p=sys.argv[1]; d=open(p,\"rb\").read(); n=d.count(bytes([0x5C,0x6E,0x0A])); d=d.replace(bytes([0x5C,0x6E,0x0A]),bytes([0x0A])); open(p,\"wb\").write(d); print(f\"strip backslash-n literal: {n}\")" .env.production && \
-             docker builder prune -af --filter "until=72h" 2>&1 | tail -3 && \
-             docker image prune -af --filter "until=72h" 2>&1 | tail -3 && \
-             docker build -t utilizai-web:new . && \
-             docker stop utilizai-web 2>/dev/null || true && \
-             docker rm utilizai-web 2>/dev/null || true && \
-             docker tag utilizai-web:new utilizai-web:latest && \
+            'set -e; \
+             cd /home/ubuntu/apps/utilizai; \
+             git fetch origin; \
+             git reset --hard origin/main; \
+             sed -i "s/^\([A-Z_][A-Z0-9_]*\)=\"\(.*\)\"$/\1=\2/" .env.production; \
+             python3 -c "import sys; p=sys.argv[1]; d=open(p,\"rb\").read(); n=d.count(bytes([0x5C,0x6E,0x0A])); d=d.replace(bytes([0x5C,0x6E,0x0A]),bytes([0x0A])); open(p,\"wb\").write(d); print(f\"strip backslash-n literal: {n}\")" .env.production; \
+             docker builder prune -af 2>&1 | tail -3 || true; \
+             docker image prune -af 2>&1 | tail -3 || true; \
+             docker build -t utilizai-web:new .; \
+             docker stop utilizai-web 2>/dev/null || true; \
+             docker rm -f utilizai-web 2>/dev/null || true; \
+             docker tag utilizai-web:new utilizai-web:latest; \
              docker run -d --name utilizai-web --restart unless-stopped \
                --env-file /home/ubuntu/apps/utilizai/.env.production \
-               -p 127.0.0.1:3011:3011 utilizai-web:latest && \
-             sleep 8 && \
-             docker logs utilizai-web 2>&1 | tail -20 && \
-             curl -fsS http://127.0.0.1:3011/ -o /dev/null -w "OK %{http_code}\n" && \
+               -p 127.0.0.1:3011:3011 utilizai-web:latest; \
+             sleep 8; \
+             docker logs utilizai-web 2>&1 | tail -20; \
+             curl -fsS http://127.0.0.1:3011/ -o /dev/null -w "OK %{http_code}\n"; \
              df -h / | tail -1'
 
       - name: Save deployed SHA
