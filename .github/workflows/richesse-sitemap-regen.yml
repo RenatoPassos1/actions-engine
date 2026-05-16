@@ -38,7 +38,19 @@ jobs:
           SUPABASE_URL: https://jvjirmglnorgmhuqjnvm.supabase.co
           SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k
         run: |
-          python scripts/generate_sitemap.py
+          set -euo pipefail
+          # Retry: Supabase REST as vezes devolve 5xx transitorio. Sem retry,
+          # um unico blip derruba o cron e dispara alerta. 3 tentativas.
+          n=0
+          until python scripts/generate_sitemap.py; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::generate_sitemap.py falhou apos 3 tentativas (Supabase 5xx persistente)"
+              exit 1
+            fi
+            echo "Tentativa $n falhou (provavel 5xx Supabase). Retry em 20s..."
+            sleep 20
+          done
           ls -la sitemap.xml
           python -c "import xml.etree.ElementTree as ET; t=ET.parse('sitemap.xml'); print(f'URLs: {len(list(t.getroot()))}')"
 
