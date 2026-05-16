@@ -73,6 +73,8 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UTILIZAI_IMAGES_API: ${{ secrets.UTILIZAI_IMAGES_API }}
         run: |
           {
             echo "GEMINI_API_KEY=${GEMINI_API_KEY}"
@@ -86,6 +88,8 @@ jobs:
             echo "CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}"
             echo "CMC_API_KEY=${CMC_API_KEY}"
             echo "UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}"
+            echo "PEXELS_API_KEY=${PEXELS_API_KEY}"
+            echo "UTILIZAI_IMAGES_API=${UTILIZAI_IMAGES_API}"
             echo "SITE_URL=https://satoshishouse.com"
             echo "SITE_NAME=Satoshi's House"
           } > .env
