@@ -23,7 +23,16 @@
 # Setup pré-requisito (1x, já feito em 21/04/2026):
 # 1. Neste repo (actions-engine): Settings → Secrets and variables → Actions
 #    UTILIZAI_CRON_SECRET = mesmo valor do Vercel env var CRON_SECRET
-#    (Opcional) UTILIZAI_APP_URL = URL base (default: https://xn--utiliza-eza.com)
+#    (Opcional) UTILIZAI_APP_URL = URL base
+#
+# IMPORTANTE (2026-05-16): default = https://utilizai-platform.vercel.app
+# (alias de producao Vercel, MESMO que o master usa internamente). NAO usar
+# o dominio xn--utiliza-eza.com aqui: ele passa pelo proxy Cloudflare, que
+# tem timeout fixo ~100s e devolve HTTP 524 antes do master terminar (o
+# master roda 8+ sub-jobs sequenciais, maxDuration=300). O trabalho ate
+# completava server-side no Vercel, mas o workflow via 524 e marcava
+# falha. Indo direto no alias Vercel, o limite vira o maxDuration=300 e o
+# curl (--max-time 320) espera a resposta real (200 ou 500 fail-loud).
 
 name: "UtilizAí: News Pipeline Cron"
 
@@ -54,7 +63,7 @@ jobs:
         id: trigger
         env:
           CRON_SECRET: ${{ secrets.UTILIZAI_CRON_SECRET }}
-          BASE_URL: ${{ vars.UTILIZAI_APP_URL || 'https://xn--utiliza-eza.com' }}
+          BASE_URL: ${{ vars.UTILIZAI_APP_URL || 'https://utilizai-platform.vercel.app' }}
         run: |
           set -euo pipefail
           if [ -z "${CRON_SECRET}" ]; then
@@ -81,7 +90,7 @@ jobs:
       - name: Verify pipeline health after run
         if: always()
         env:
-          BASE_URL: ${{ vars.UTILIZAI_APP_URL || 'https://xn--utiliza-eza.com' }}
+          BASE_URL: ${{ vars.UTILIZAI_APP_URL || 'https://utilizai-platform.vercel.app' }}
         run: |
           set -eu
           echo "Checking /api/cron/health..."
@@ -97,4 +106,4 @@ jobs:
           echo "- **Cron trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **HTTP status:** \`${{ steps.trigger.outputs.http_code }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Site:** https://utilizaí.com" >> $GITHUB_STEP_SUMMARY
-          echo "- **Health:** https://xn--utiliza-eza.com/api/cron/health" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health:** https://utilizai-platform.vercel.app/api/cron/health" >> $GITHUB_STEP_SUMMARY
