@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout VEKTOR-WEB-BACKUP
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/VEKTOR-WEB-BACKUP
           token: ${{ secrets.REPO_PAT }}
@@ -132,7 +132,7 @@ jobs:
 
     steps:
       - name: Checkout vektor-consultoria
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/vektor-consultoria
           token: ${{ secrets.REPO_PAT }}

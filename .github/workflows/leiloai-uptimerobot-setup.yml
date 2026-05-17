@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout leilao-watch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/leilao-watch
           ref: main

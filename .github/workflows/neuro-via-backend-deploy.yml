@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Checkout private repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/neuro-via
           token: ${{ secrets.REPO_PAT }}
