@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout actions-engine (pra ler state file)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           token: ${{ secrets.REPO_PAT }}

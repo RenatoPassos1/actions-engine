@@ -30,7 +30,7 @@ jobs:
 
     steps:
       - name: Checkout UtilizAi (private)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/UtilizAi
           token: ${{ secrets.REPO_PAT }}

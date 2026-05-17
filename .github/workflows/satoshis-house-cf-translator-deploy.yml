@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout private repo (satoshi-s-house)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/satoshi-s-house
           token: ${{ secrets.REPO_PAT }}
@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
 

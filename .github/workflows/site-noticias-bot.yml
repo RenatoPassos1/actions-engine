@@ -17,13 +17,13 @@ jobs:
 
     steps:
       - name: Checkout private repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/site-noticias-bot
           token: ${{ secrets.REPO_PAT }}
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
