@@ -95,12 +95,22 @@ jobs:
           fi
           echo "Triggering ${URL}"
           RESPONSE_FILE=$(mktemp)
-          HTTP_CODE=$(curl -sS -o "${RESPONSE_FILE}" -w "%{http_code}" \
-            --max-time 90 \
-            -X POST \
-            -H "Authorization: Bearer ${CRON_SECRET}" \
-            -H "Content-Type: application/json" \
-            "${URL}")
+          # Geracao com IA + RSS as vezes da 500 transitorio (cold start,
+          # blip de DB/DeepSeek). max-time 180 cobre a geracao lenta;
+          # 4 tentativas com backoff (20s/40s/60s) absorvem o transitorio.
+          # So falha (e emaila) se persistir nas 4.
+          HTTP_CODE="000"
+          for attempt in 1 2 3 4; do
+            HTTP_CODE=$(curl -sS -o "${RESPONSE_FILE}" -w "%{http_code}" \
+              --max-time 180 \
+              -X POST \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "Content-Type: application/json" \
+              "${URL}" || echo "000")
+            echo "Tentativa ${attempt}: HTTP ${HTTP_CODE}"
+            [ "${HTTP_CODE}" = "200" ] && break
+            [ "${attempt}" -lt 4 ] && sleep $(( attempt * 20 ))
+          done
           echo "HTTP: ${HTTP_CODE}"
           echo "--- Body ---"
           cat "${RESPONSE_FILE}"
@@ -109,7 +119,7 @@ jobs:
           SLUG=$(cat "${RESPONSE_FILE}" | grep -oE '"slug":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")
           echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
           if [ "${HTTP_CODE}" != "200" ]; then
-            echo "::error::News generator returned HTTP ${HTTP_CODE}"
+            echo "::error::News generator returned HTTP ${HTTP_CODE} apos 4 tentativas"
             exit 1
           fi
 
