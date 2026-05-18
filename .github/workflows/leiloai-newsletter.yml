@@ -49,6 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL \
+            --retry 5 --retry-delay 15 --retry-all-errors \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             "https://leiloai.com/api/newsletter/radar" \
             --max-time 300 \
@@ -68,6 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL \
+            --retry 5 --retry-delay 15 --retry-all-errors \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             "https://leiloai.com/api/newsletter/pro?periodo=manha" \
             --max-time 300 \
@@ -87,6 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL \
+            --retry 5 --retry-delay 15 --retry-all-errors \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             "https://leiloai.com/api/newsletter/pro?periodo=tarde" \
             --max-time 300 \
@@ -106,6 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL \
+            --retry 5 --retry-delay 15 --retry-all-errors \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             "https://leiloai.com/api/newsletter/premium" \
             --max-time 300 \
@@ -124,6 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL \
+            --retry 5 --retry-delay 15 --retry-all-errors \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             "https://leiloai.com/api/email/welcome" \
             --max-time 120 \
@@ -142,6 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL \
+            --retry 5 --retry-delay 15 --retry-all-errors \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             "https://leiloai.com/api/digest/weekly" \
             --max-time 600 \

@@ -107,13 +107,33 @@ jobs:
       - name: Dispara worker ${{ matrix.worker }}
         env:
           DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+          WURL: "https://leiloai-ingest-${{ matrix.worker }}.renatopassos516.workers.dev/run"
         run: |
-          set -euo pipefail
-          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-ingest-${{ matrix.worker }}.renatopassos516.workers.dev/run" \
-            --max-time 600 \
-            | head -c 500
-          echo
+          set -uo pipefail
+          # Workers de ingestao rodam longo no Cloudflare. Se estourar o
+          # --max-time (curl exit 28) o worker continua processando
+          # server-side e o job orchestrator_safety re-dispara pela
+          # cadencia em jobs_log -> kickoff timeout nao derruba o cron.
+          # Erros de conexao/HTTP/auth seguem fatais (3 tentativas).
+          rc=0; HTTP=000
+          for attempt in 1 2 3; do
+            HTTP=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
+              -H "x-disparo-secret: ${DISPARO}" \
+              --max-time 600 "$WURL"); rc=$?
+            if [ "$rc" -eq 0 ] && [ "$HTTP" = "200" ]; then
+              head -c 500 /tmp/resp.txt; echo
+              exit 0
+            fi
+            if [ "$rc" -eq 28 ]; then
+              echo "::warning::${{ matrix.worker }}: kickoff excedeu 600s (curl 28); worker segue rodando, orchestrator_safety cobre"
+              exit 0
+            fi
+            echo "tentativa ${attempt}: rc=${rc} http=${HTTP}"
+            [ "$attempt" -lt 3 ] && sleep $(( attempt * 20 ))
+          done
+          echo "::error::${{ matrix.worker }}: falhou apos 3 tentativas (rc=${rc} http=${HTTP})"
+          head -c 500 /tmp/resp.txt 2>/dev/null || true
+          exit 1
 
   marketplaces:
     if: >-

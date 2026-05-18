@@ -24,7 +24,7 @@ jobs:
   poll-and-deploy:
     name: Poll SHA and deploy if changed
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - name: Get HEAD SHA of leilao-watch/feat/landing
@@ -92,7 +92,13 @@ jobs:
           # 'docker run' (name already in use) ou deployava imagem stale.
           # prune -af sem filtro until: libera TODO cache/dangling, mata o
           # ENOSPC. docker rm -f: remove container mesmo rodando.
+          # ServerAliveInterval: docker build fica ~12 min mudo no canal
+          # SSH; sem keepalive o TCP cai por idle (client_loop: send
+          # disconnect: Broken pipe, exit 255) mesmo com o build OK no
+          # servidor. 30s * 20 tolera ate 10 min de rede indisponivel.
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
             "$ORACLE_USER@$ORACLE_HOST" \
             'set -e; \
              cd /home/ubuntu/apps/leiloai; \
