@@ -117,9 +117,12 @@ jobs:
           # Erros de conexao/HTTP/auth seguem fatais (3 tentativas).
           rc=0; HTTP=000
           for attempt in 1 2 3; do
+            set +e
             HTTP=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
               -H "x-disparo-secret: ${DISPARO}" \
-              --max-time 600 "$WURL"); rc=$?
+              --max-time 600 "$WURL")
+            rc=$?
+            set -e
             if [ "$rc" -eq 0 ] && [ "$HTTP" = "200" ]; then
               head -c 500 /tmp/resp.txt; echo
               exit 0
