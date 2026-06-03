@@ -88,6 +88,8 @@ jobs:
           REPO_PAT: ${{ secrets.REPO_PAT }}
         run: |
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
             "$ORACLE_USER@$ORACLE_HOST" \
             "set -euo pipefail
              REPO_DIR=/home/ubuntu/apps/richesse-club

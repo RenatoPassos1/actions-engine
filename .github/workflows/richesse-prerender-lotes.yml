@@ -68,12 +68,12 @@ jobs:
           # Sync lotes-html/<slug>/index.html -> /var/www/richesseclub/lote/<slug>/index.html
           # Usa --delete pra remover lotes que nao existem mais no banco
           rsync -avz --delete \
-            -e "ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no" \
+            -e "ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes" \
             lotes-html/ \
             "$ORACLE_USER@$ORACLE_HOST:/tmp/richesse-lotes/"
 
           # Move pra /var/www com sudo (sshd nao pode rsync direto pra /var/www)
-          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes "$ORACLE_USER@$ORACLE_HOST" "bash -se" << 'REMOTE'
           set -eu
           sudo mkdir -p /var/www/richesseclub/lote
           # Sync atomico via rsync local (Oracle -> /var/www)
