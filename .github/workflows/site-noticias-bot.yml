@@ -72,6 +72,7 @@ jobs:
 
       - name: Deploy fallback (retry)
         if: failure()
+        continue-on-error: true
         env:
           FTP_HOST: ${{ secrets.NB_FTP_HOST }}
           FTP_USER: ${{ secrets.NB_FTP_USER }}
