@@ -58,11 +58,16 @@ jobs:
         timeout-minutes: 3
         run: |
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow true
+          set ftp:ssl-force true
+          set ftp:ssl-protect-data true
           set ssl:verify-certificate no
           set ftp:passive-mode yes
-          set net:timeout 30
-          set net:max-retries 2
+          set net:timeout 20
+          set net:max-retries 3
           set net:reconnect-interval-base 5
+          set net:reconnect-interval-multiplier 1
+          debug 3
           cd ${REMOTE_DIR:-/public_html}
           put public/noticias.json
           put public/noticias.html
@@ -82,10 +87,16 @@ jobs:
         run: |
           sleep 10
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow true
+          set ftp:ssl-force true
+          set ftp:ssl-protect-data true
           set ssl:verify-certificate no
           set ftp:passive-mode yes
-          set net:timeout 30
-          set net:max-retries 2
+          set net:timeout 20
+          set net:max-retries 3
+          set net:reconnect-interval-base 5
+          set net:reconnect-interval-multiplier 1
+          debug 3
           cd ${REMOTE_DIR:-/public_html}
           put public/noticias.json
           put public/noticias.html
