@@ -1,0 +1,38 @@
+name: "Emprego Europa: Job Scraper"
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Roda a cada 6 horas
+  workflow_dispatch:
+
+concurrency:
+  group: emprego-europa-scraper
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    name: Run Python Scraper
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Private Repo
+        uses: actions/checkout@v4
+        with:
+          repository: RenatoPassos1/EMPREGO-EUROPA
+          token: ${{ secrets.GH_PAT }} # O PAT token precisa estar nos Secrets do actions-engine
+          path: EMPREGO-EUROPA
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        working-directory: ./EMPREGO-EUROPA
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Scraper
+        working-directory: ./EMPREGO-EUROPA
+        run: python main.py
