@@ -26,6 +26,6 @@ jobs:
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" '
-            echo "Searching for items table in all schemas..."
-            docker exec supabase-db psql -U postgres -d postgres -c "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name = '\''items'\'';" || true
+            echo "Printing view definition for leiloeiros_publico..."
+            docker exec supabase-db psql -U postgres -d postgres -c "SELECT pg_get_viewdef('public.leiloeiros_publico');" || true
           '
