@@ -1,0 +1,36 @@
+name: "Extract Env"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        env:
+          SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          if printf '%s' "$SSH_KEY_B64" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$SSH_KEY_B64" > ~/.ssh/oracle_key
+          else
+            printf '%s' "$SSH_KEY_B64" | base64 -d > ~/.ssh/oracle_key
+          fi
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Read Env
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" 'cat /home/ubuntu/apps/leiloai/apps/web/.env.production' > env.txt
+          cat env.txt
+
+      - name: Upload Env
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-production
+          path: env.txt
