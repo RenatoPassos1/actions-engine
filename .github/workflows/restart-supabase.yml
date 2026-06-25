@@ -6,6 +6,9 @@ jobs:
   restart:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Setup SSH
         env:
           SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
