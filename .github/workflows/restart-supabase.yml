@@ -30,6 +30,5 @@ jobs:
         run: |
           scp -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no create-items.sql "$ORACLE_USER@$ORACLE_HOST:/tmp/create-items.sql"
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" '
-            docker exec -i supabase-db psql -U postgres -d postgres < /tmp/create-items.sql
-            echo "items table created!"
+            cat /home/ubuntu/apps/leiloai/apps/web/.env.production
           '
