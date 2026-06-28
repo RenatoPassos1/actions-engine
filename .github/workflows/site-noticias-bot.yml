@@ -52,7 +52,7 @@ jobs:
           server: ${{ secrets.NB_FTP_HOST }}
           username: ${{ secrets.NB_FTP_USER }}
           password: ${{ secrets.NB_FTP_PASS }}
-          server-dir: ${{ secrets.NB_REMOTE_DIR || '/public_html/' }}
+          server-dir: /public_html/
           local-dir: ./public/
           exclude: |
             **/.git*
