@@ -63,7 +63,11 @@ jobs:
       - name: Create .env file
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.UTILIZAI_GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.UTILIZAI_GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.UTILIZAI_GROQ_API_KEY_3 }}
+          GROQ_API_KEY_4: ${{ secrets.UTILIZAI_GROQ_API_KEY_4 }}
+          GROQ_API_KEY_5: ${{ secrets.UTILIZAI_GROQ_API_KEY_5 }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           LLAMA_API_KEY: ${{ secrets.LLAMA_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
@@ -79,6 +83,10 @@ jobs:
           {
             echo "GEMINI_API_KEY=${GEMINI_API_KEY}"
             echo "GROQ_API_KEY=${GROQ_API_KEY}"
+            echo "GROQ_API_KEY_2=${GROQ_API_KEY_2}"
+            echo "GROQ_API_KEY_3=${GROQ_API_KEY_3}"
+            echo "GROQ_API_KEY_4=${GROQ_API_KEY_4}"
+            echo "GROQ_API_KEY_5=${GROQ_API_KEY_5}"
             echo "XAI_API_KEY=${XAI_API_KEY}"
             echo "LLAMA_API_KEY=${LLAMA_API_KEY}"
             echo "MISTRAL_API_KEY=${MISTRAL_API_KEY}"
@@ -147,8 +155,8 @@ jobs:
       - name: Commit and push
         if: steps.changes.outputs.has_changes == 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "Satoshi's House Bot"
+          git config user.email "bot@satoshishouse.com"
           DATE_BR=$(TZ="America/Sao_Paulo" date +"%d/%m/%Y %H:%M")
           git commit -m "content: ${{ steps.changes.outputs.article_count }} novos artigos — ${DATE_BR} BRT"
           git push
