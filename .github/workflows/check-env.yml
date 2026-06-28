@@ -1,0 +1,34 @@
+name: "Check Env"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        env:
+          SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          if printf '%s' "$SSH_KEY_B64" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$SSH_KEY_B64" > ~/.ssh/oracle_key
+          else
+            printf '%s' "$SSH_KEY_B64" | base64 -d > ~/.ssh/oracle_key
+          fi
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Inspect Docker Env
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" '
+          echo "=== CONTAINER ENV ==="
+          docker exec leiloai-web env | grep -E "GROQ|OPENAI" || echo "NOT FOUND IN CONTAINER"
+          echo "=== FILE ENV ==="
+          cat /home/ubuntu/apps/leiloai/apps/web/.env.production | grep -E "GROQ|OPENAI" || echo "NOT FOUND IN FILE"
+          '
