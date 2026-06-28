@@ -46,15 +46,60 @@ jobs:
           git diff --cached --quiet || git commit -m "chore: update news feed $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push
 
+      - name: Install lftp
+        run: sudo apt-get update && sudo apt-get install -y lftp
+
       - name: Deploy to Hostinger via FTP
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
-        with:
-          server: ${{ secrets.NB_FTP_HOST }}
-          username: ${{ secrets.NB_FTP_USER }}
-          password: ${{ secrets.NB_FTP_PASS }}
-          server-dir: /public_html/
-          local-dir: ./public/
-          exclude: |
-            **/.git*
-            **/.git*/**
-            **/node_modules/**
+        env:
+          FTP_HOST: ${{ secrets.NB_FTP_HOST }}
+          FTP_USER: ${{ secrets.NB_FTP_USER }}
+          FTP_PASS: ${{ secrets.NB_FTP_PASS }}
+          REMOTE_DIR: ${{ secrets.NB_REMOTE_DIR }}
+        timeout-minutes: 3
+        run: |
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow false
+          set ftp:ssl-force false
+          set ftp:ssl-protect-data true
+          set ssl:verify-certificate no
+          set ftp:passive-mode yes
+          set net:timeout 20
+          set net:max-retries 3
+          set net:reconnect-interval-base 5
+          set net:reconnect-interval-multiplier 1
+          debug 3
+          cd ${REMOTE_DIR:-/public_html}
+          put public/noticias.json
+          put public/noticias.html
+          bye
+          EOF
+          echo "Deploy concluído!"
+
+      - name: Deploy fallback (retry)
+        if: failure()
+        continue-on-error: true
+        env:
+          FTP_HOST: ${{ secrets.NB_FTP_HOST }}
+          FTP_USER: ${{ secrets.NB_FTP_USER }}
+          FTP_PASS: ${{ secrets.NB_FTP_PASS }}
+          REMOTE_DIR: ${{ secrets.NB_REMOTE_DIR }}
+        timeout-minutes: 3
+        run: |
+          sleep 10
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow false
+          set ftp:ssl-force false
+          set ftp:ssl-protect-data true
+          set ssl:verify-certificate no
+          set ftp:passive-mode yes
+          set net:timeout 20
+          set net:max-retries 3
+          set net:reconnect-interval-base 5
+          set net:reconnect-interval-multiplier 1
+          debug 3
+          cd ${REMOTE_DIR:-/public_html}
+          put public/noticias.json
+          put public/noticias.html
+          bye
+          EOF
+          echo "Deploy (retry) concluído!"
