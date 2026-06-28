@@ -1,0 +1,54 @@
+name: "Inject Keys to LeiloAI Oracle"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inject:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        env:
+          SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          if printf '%s' "$SSH_KEY_B64" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$SSH_KEY_B64" > ~/.ssh/oracle_key
+          else
+            printf '%s' "$SSH_KEY_B64" | base64 -d > ~/.ssh/oracle_key
+          fi
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Append Keys and Restart
+        env:
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.UTILIZAI_GROQ_API_KEY_3 }}
+          GROQ_API_KEY_4: ${{ secrets.UTILIZAI_GROQ_API_KEY_4 }}
+          GROQ_API_KEY_5: ${{ secrets.UTILIZAI_GROQ_API_KEY_5 }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no "$ORACLE_USER@$ORACLE_HOST" "
+          ENV_FILE='/home/ubuntu/apps/leiloai/apps/web/.env.production'
+          
+          sed -i '/^GROQ_API_KEY/d' \$ENV_FILE
+          sed -i '/^OPENAI_API_KEY/d' \$ENV_FILE
+
+          echo 'GROQ_API_KEY=$GROQ_API_KEY' >> \$ENV_FILE
+          echo 'GROQ_API_KEY_2=$GROQ_API_KEY_2' >> \$ENV_FILE
+          echo 'GROQ_API_KEY_3=$GROQ_API_KEY_3' >> \$ENV_FILE
+          echo 'GROQ_API_KEY_4=$GROQ_API_KEY_4' >> \$ENV_FILE
+          echo 'GROQ_API_KEY_5=$GROQ_API_KEY_5' >> \$ENV_FILE
+          echo 'OPENAI_API_KEY=$OPENAI_API_KEY' >> \$ENV_FILE
+          
+          cd /home/ubuntu/apps/leiloai
+          docker stop leiloai-web 2>/dev/null || true
+          docker rm -f leiloai-web 2>/dev/null || true
+          docker run -d --name leiloai-web --restart unless-stopped \
+            --env-file /home/ubuntu/apps/leiloai/apps/web/.env.production \
+            -p 127.0.0.1:3010:3010 leiloai-web:latest
+          "
