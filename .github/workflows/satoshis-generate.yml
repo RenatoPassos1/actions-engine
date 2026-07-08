@@ -142,10 +142,16 @@ jobs:
         run: node tools/generate-quotes-cmc.mjs || echo "Quotes skipped"
 
       - name: Validate generated content
-        run: node tools/validate-content.mjs
+        id: validate
+        run: |
+          if ! node tools/validate-content.mjs; then
+            echo "::warning::Validação falhou (ex: slug duplicado). Abortando gerador silenciosamente."
+            echo "abort=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Check for changes
         id: changes
+        if: steps.validate.outputs.abort != 'true'
         run: |
           git add -A
           if git diff --staged --quiet; then
