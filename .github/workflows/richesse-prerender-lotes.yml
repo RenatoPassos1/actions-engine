@@ -38,7 +38,14 @@ jobs:
           SUPABASE_URL: https://jvjirmglnorgmhuqjnvm.supabase.co
           SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k
         run: |
-          python scripts/prerender_lotes.py
+          if ! python scripts/prerender_lotes.py 2>&1 | tee prerender.log; then
+            if grep -q -E "402|50[0-9]" prerender.log; then
+              echo "::warning::prerender_lotes.py falhou com 402/5xx (Supabase). Ignorando para nao falhar o cron."
+              exit 0
+            else
+              exit 1
+            fi
+          fi
           echo "=== output stats ==="
           find lotes-html -name 'index.html' | wc -l
           du -sh lotes-html
