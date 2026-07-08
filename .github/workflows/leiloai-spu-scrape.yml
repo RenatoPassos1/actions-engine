@@ -89,7 +89,7 @@ jobs:
 
           console.log("Abrindo portal SPU…");
           await page.goto("https://imoveis.economia.gov.br/leiloes", {
-            waitUntil: "networkidle",
+            waitUntil: "domcontentloaded",
             timeout: 60_000,
           });
 
