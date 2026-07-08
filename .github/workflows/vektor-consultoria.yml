@@ -146,13 +146,25 @@ jobs:
         run: pip install google-genai groq mistralai openai pytrends
 
       - name: Generate RevOps articles
+        id: generate
         run: |
           COUNT=${{ github.event.inputs.count || '5' }}
           CMD="python tools/revops_news_auto.py --count $COUNT --regenerate"
           echo "Running: $CMD"
-          $CMD
+          if ! $CMD > revops_output.log 2>&1; then
+            cat revops_output.log
+            if grep -q "Nenhum artigo gerado com sucesso" revops_output.log; then
+              echo "::warning::Nenhum artigo gerado (possível erro de API). Ignorando para não falhar a cron."
+              echo "abort=true" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              exit 1
+            fi
+          fi
+          cat revops_output.log
 
       - name: Commit generated content
+        if: steps.generate.outputs.abort != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -161,6 +173,7 @@ jobs:
           git push
 
       - name: Deploy to Hostinger via FTP
+        if: steps.generate.outputs.abort != 'true'
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.VK_FTP_HOST }}

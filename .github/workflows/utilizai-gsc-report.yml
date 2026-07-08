@@ -79,7 +79,15 @@ jobs:
           # Persistência histórica em Supabase (tabela gsc_reports)
           SUPABASE_URL:              ${{ secrets.UTILIZAI_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.UTILIZAI_SUPABASE_SERVICE_ROLE_KEY }}
-        run: python report.py
+        run: |
+          if ! python report.py 2>&1 | tee report.log; then
+            if grep -q -E "Supabase persist exception|Failed to resolve" report.log; then
+              echo "::warning::report.py falhou ao salvar no Supabase (projeto pausado?). Ignorando falha para não sujar caixa de entrada."
+              exit 0
+            else
+              exit 1
+            fi
+          fi
 
       - name: Upload report artifact
         if: always()
