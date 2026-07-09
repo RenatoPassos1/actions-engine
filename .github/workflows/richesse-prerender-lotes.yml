@@ -102,7 +102,7 @@ jobs:
           # Pega um slug recente do Supabase
           SLUG=$(curl -sS "https://jvjirmglnorgmhuqjnvm.supabase.co/rest/v1/lotes?select=slug&order=data_fim_leilao.desc&limit=1" \
             -H "apikey: ${{ env.ANON || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k' }}" \
-            | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['slug'] if d else '')")
+            | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['slug'] if isinstance(d, list) and d else '')")
           echo "Testing slug: $SLUG"
           if [ -n "$SLUG" ]; then
             echo "--- title ---"
