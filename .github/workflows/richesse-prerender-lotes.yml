@@ -35,8 +35,8 @@ jobs:
 
       - name: Run prerender
         env:
-          SUPABASE_URL: https://jvjirmglnorgmhuqjnvm.supabase.co
-          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k
+          SUPABASE_URL: http://137.131.143.236:8001
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjIwOTk1MzU2MDB9.G4jjO8TUo0_58C9hvanGOkjXB-GM-2tqevuWsoc3bno
         run: |
           if ! python scripts/prerender_lotes.py 2>&1 | tee prerender.log; then
             if grep -q -E "402|50[0-9]" prerender.log; then
@@ -100,8 +100,8 @@ jobs:
           IP=$(dig +short richesseclub.com @1.1.1.1 | head -1)
           echo "=== test SSR via Cloudflare ==="
           # Pega um slug recente do Supabase
-          SLUG=$(curl -sS "https://jvjirmglnorgmhuqjnvm.supabase.co/rest/v1/lotes?select=slug&order=data_fim_leilao.desc&limit=1" \
-            -H "apikey: ${{ env.ANON || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2amlybWdsbm9yZ21odXFqbnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMDAyNjYsImV4cCI6MjA5MzY3NjI2Nn0.CM_2izF9W-snTzgXuqpw4SWpcQAPpvBUxh260MFEK-k' }}" \
+          SLUG=$(curl -sS "http://137.131.143.236:8001/rest/v1/lotes?select=slug&order=data_fim_leilao.desc&limit=1" \
+            -H "apikey: ${{ env.ANON || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjIwOTk1MzU2MDB9.G4jjO8TUo0_58C9hvanGOkjXB-GM-2tqevuWsoc3bno' }}" \
             | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['slug'] if isinstance(d, list) and d else '')")
           echo "Testing slug: $SLUG"
           if [ -n "$SLUG" ]; then
