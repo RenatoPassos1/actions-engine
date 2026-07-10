@@ -33,23 +33,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run prerender
-        env:
-          SUPABASE_URL: http://137.131.143.236:8001
-          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjIwOTk1MzU2MDB9.G4jjO8TUo0_58C9hvanGOkjXB-GM-2tqevuWsoc3bno
-        run: |
-          if ! python scripts/prerender_lotes.py 2>&1 | tee prerender.log; then
-            if grep -q -E "402|50[0-9]" prerender.log; then
-              echo "::warning::prerender_lotes.py falhou com 402/5xx (Supabase). Ignorando para nao falhar o cron."
-              exit 0
-            else
-              exit 1
-            fi
-          fi
-          echo "=== output stats ==="
-          find lotes-html -name 'index.html' | wc -l
-          du -sh lotes-html
-
       - name: Setup SSH
         env:
           SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
@@ -66,6 +49,33 @@ jobs:
           fi
           chmod 600 ~/.ssh/oracle_key
           ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run prerender
+        env:
+          SUPABASE_URL: http://127.0.0.1:8001
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjIwOTk1MzU2MDB9.G4jjO8TUo0_58C9hvanGOkjXB-GM-2tqevuWsoc3bno
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          # Start SSH tunnel in the background
+          ssh -i ~/.ssh/oracle_key -N -L 8001:127.0.0.1:8001 ubuntu@$ORACLE_HOST &
+          SSH_PID=$!
+          sleep 2 # wait for tunnel to establish
+          
+          if ! python scripts/prerender_lotes.py 2>&1 | tee prerender.log; then
+            if grep -q -E "402|50[0-9]" prerender.log; then
+              echo "::warning::prerender_lotes.py falhou com 402/5xx (Supabase). Ignorando para nao falhar o cron."
+              kill $SSH_PID
+              exit 0
+            else
+              kill $SSH_PID
+              exit 1
+            fi
+          fi
+          kill $SSH_PID
+          
+          echo "=== output stats ==="
+          find lotes-html -name 'index.html' | wc -l
+          du -sh lotes-html
 
       - name: Rsync pre-rendered HTMLs to Oracle
         env:
