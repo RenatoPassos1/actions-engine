@@ -110,9 +110,7 @@ jobs:
           IP=$(dig +short richesseclub.com @1.1.1.1 | head -1)
           echo "=== test SSR via Cloudflare ==="
           # Pega um slug recente do Supabase
-          SLUG=$(curl -sS "http://137.131.143.236:8001/rest/v1/lotes?select=slug&order=data_fim_leilao.desc&limit=1" \
-            -H "apikey: ${{ env.ANON || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjIwOTk1MzU2MDB9.G4jjO8TUo0_58C9hvanGOkjXB-GM-2tqevuWsoc3bno' }}" \
-            | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['slug'] if isinstance(d, list) and d else '')")
+          SLUG=$(ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no ubuntu@${{ secrets.ORACLE_HOST }} "curl -sS 'http://127.0.0.1:8001/rest/v1/lotes?select=slug&order=data_fim_leilao.desc&limit=1' -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNjQxNzY5MjAwLCJleHAiOjIwOTk1MzU2MDB9.G4jjO8TUo0_58C9hvanGOkjXB-GM-2tqevuWsoc3bno'" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['slug'] if isinstance(d, list) and d else '')")
           echo "Testing slug: $SLUG"
           if [ -n "$SLUG" ]; then
             echo "--- title ---"
