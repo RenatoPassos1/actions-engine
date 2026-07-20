@@ -24,7 +24,7 @@ jobs:
   poll-and-deploy:
     name: Poll SHA and deploy if changed
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
 
     steps:
       - name: Get HEAD SHA of UtilizAi/main
