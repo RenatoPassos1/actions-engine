@@ -45,7 +45,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .last-deployed-sha
-          key: richesse-oracle-last-deployed-sha
+          key: richesse-oracle-last-deployed-sha-${{ github.run_id }}
+          restore-keys: |
+            richesse-oracle-last-deployed-sha-
 
       - name: Compare SHAs
         id: compare
@@ -164,7 +166,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .last-deployed-sha
-          key: richesse-oracle-last-deployed-sha
+          key: richesse-oracle-last-deployed-sha-${{ github.run_id }}
 
       - name: Summary
         if: always()

@@ -86,7 +86,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .last-deployed-sha
-          key: utilizai-cli-last-deployed-sha
+          key: utilizai-cli-last-deployed-sha-${{ github.run_id }}
+          restore-keys: |
+            utilizai-cli-last-deployed-sha-
 
       - name: Compare SHAs
         id: compare
