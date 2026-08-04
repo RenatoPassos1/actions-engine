@@ -9,11 +9,13 @@
 #   LEILOAI_CF_ACCOUNT        - Cloudflare account ID
 #   CF_R2_BUCKET              - nome do bucket R2 (default: leiloai-backups)
 
-name: "LeiloAI: Backup Weekly"
+name: "LeiloAI: Backup Diario"
 
 on:
   schedule:
-    - cron: '0 4 * * 0' # domingo 04h UTC (01h BRT)
+    - cron: '0 4 * * *' # DIARIO 04h UTC (01h BRT). Era semanal ate 04/08/2026:
+                        # o incidente da migracao mostrou que 7 dias de janela
+                        # de perda e inaceitavel.
   workflow_dispatch:
 
 permissions:
@@ -32,10 +34,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Instala postgresql-client
+      - name: Instala postgresql-client 17 (PGDG)
         run: |
+          set -euo pipefail
+          # O client padrao do Ubuntu e o 16 e ele RECUSA dumpar servidor 17
+          # ("server version mismatch"). Supabase roda Postgres 17.6.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-client-17
+          pg_dump --version
 
       - name: Roda pg_dump
         id: dump
@@ -50,27 +61,48 @@ jobs:
             echo "erro=secret ausente" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # pipefail e OBRIGATORIO: sem ele, "pg_dump | gzip" retorna o status do
+          # gzip (sempre 0) e um dump que falhou virava .gz vazio de 20 bytes
+          # reportado como sucesso. Foi o que aconteceu de 04/2026 a 08/2026:
+          # todos os backups eram vazios e ninguem soube ate precisar restaurar.
+          set -o pipefail
           NOW=$(date -u +%Y%m%d_%H%M%S)
           DEST="backup_${NOW}.sql.gz"
-          if pg_dump --no-owner --no-acl "$SUPABASE_DB_URL" | gzip > "$DEST"; then
-            SZ=$(stat -c '%s' "$DEST")
-            echo "Backup salvo: $DEST ($SZ bytes)"
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-            echo "arquivo=$DEST" >> "$GITHUB_OUTPUT"
-            echo "tamanho=$SZ" >> "$GITHUB_OUTPUT"
-          else
+          if ! pg_dump --no-owner --no-acl "$SUPABASE_DB_URL" | gzip > "$DEST"; then
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "erro=pg_dump falhou" >> "$GITHUB_OUTPUT"
+            echo "erro=pg_dump falhou (exit $?)" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          SZ=$(stat -c '%s' "$DEST")
+          # Validacao 1: integridade do gzip.
+          if ! gzip -t "$DEST"; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=gzip corrompido" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Validacao 2: tamanho minimo. Um dump real deste banco passa de 1 MB;
+          # qualquer coisa menor e dump vazio disfarcado.
+          MINIMO=1048576
+          if [ "$SZ" -lt "$MINIMO" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=dump suspeito: $SZ bytes (minimo $MINIMO)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Validacao 3: o dump precisa conter as tabelas criticas.
+          if ! zcat "$DEST" | grep -qE 'COPY (auth\.users|public\.users)'; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=dump sem dados de usuarios" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Backup salvo: $DEST ($SZ bytes)"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "arquivo=$DEST" >> "$GITHUB_OUTPUT"
+          echo "tamanho=$SZ" >> "$GITHUB_OUTPUT"
           exit 0
 
-      - name: Setup Node + Wrangler
-        if: steps.dump.outputs.ok == 'true'
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-
-      - name: Upload para R2 via Wrangler
+      - name: Upload para R2 (API REST)
         id: upload
         if: steps.dump.outputs.ok == 'true'
         continue-on-error: true
@@ -80,20 +112,39 @@ jobs:
           CF_R2_BUCKET: ${{ secrets.CF_R2_BUCKET }}
           ARQUIVO: ${{ steps.dump.outputs.arquivo }}
         run: |
-          set -e
+          set -uo pipefail
           BUCKET="${CF_R2_BUCKET:-leiloai-backups}"
           if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
             echo "ok=false" >> "$GITHUB_OUTPUT"
             echo "erro=Cloudflare secrets ausentes" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          npm install -g wrangler@latest
-          if wrangler r2 object put "${BUCKET}/postgres/${ARQUIVO}" --file "${ARQUIVO}" --remote; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
+          # Trocado wrangler pela API REST do R2: o wrangler falhava com
+          # "Not enough non-option arguments" e ainda exigia instalar Node+npm
+          # a cada run. curl direto e mais simples e ja validado.
+          BASE="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/r2/buckets/${BUCKET}/objects"
+          HTTP=$(curl -sS -o /tmp/r2.json -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/gzip" \
+            --data-binary "@${ARQUIVO}" \
+            "${BASE}/postgres/${ARQUIVO}")
+          cat /tmp/r2.json
+          if [ "$HTTP" != "200" ]; then
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "erro=upload R2 falhou (wrangler)" >> "$GITHUB_OUTPUT"
+            echo "erro=upload R2 HTTP $HTTP" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # Confirma que o objeto existe no bucket com o tamanho esperado.
+          REMOTO=$(curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "${BASE}?prefix=postgres/${ARQUIVO}" \
+            | python3 -c "import sys,json;r=json.load(sys.stdin).get('result') or [];print(r[0]['size'] if r else 0)")
+          echo "Tamanho no R2: ${REMOTO} bytes (local: ${{ steps.dump.outputs.tamanho }})"
+          if [ "${REMOTO:-0}" -lt 1048576 ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "erro=objeto no R2 vazio ou ausente ($REMOTO bytes)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
           exit 0
 
       - name: Abre issue se falhou
@@ -134,3 +185,25 @@ jobs:
               body: corpo,
               labels: ['incident', 'leiloai-monitor'],
             });
+
+      # O job PRECISA ficar vermelho quando o backup nao existe. Antes ele
+      # terminava verde (continue-on-error nos dois passos) e o backup vazio
+      # passou 4 meses despercebido.
+      - name: Falha o job se o backup nao foi concluido
+        if: steps.dump.outputs.ok != 'true' || steps.upload.outputs.ok != 'true'
+        run: |
+          echo "::error::Backup NAO concluido. pg_dump=${{ steps.dump.outputs.ok }} (${{ steps.dump.outputs.erro }}) upload=${{ steps.upload.outputs.ok }} (${{ steps.upload.outputs.erro }})"
+          exit 1
+
+      - name: Resumo
+        if: always()
+        run: |
+          {
+            echo "## LeiloAI, Backup do Postgres"
+            echo ""
+            echo "- pg_dump: \`${{ steps.dump.outputs.ok }}\`"
+            echo "- arquivo: \`${{ steps.dump.outputs.arquivo }}\`"
+            echo "- tamanho: \`${{ steps.dump.outputs.tamanho }}\` bytes"
+            echo "- upload R2: \`${{ steps.upload.outputs.ok }}\`"
+            echo "- bucket: \`leiloai-backups/postgres/\`"
+          } >> "$GITHUB_STEP_SUMMARY"
