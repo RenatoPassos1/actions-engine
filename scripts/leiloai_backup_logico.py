@@ -95,3 +95,25 @@ except urllib.error.HTTPError as e:
     sys.exit(f"upload R2 falhou: HTTP {e.code} {e.read().decode()[:300]}")
 print("upload R2:", r.get("success"), r.get("result", {}).get("key"),
       r.get("result", {}).get("size"), "bytes")
+
+# Retencao: mantem os 90 backups mais recentes. Sem isso o bucket cresce pra
+# sempre (2,25 MB/dia = ~820 MB/ano). O free tier do R2 sao 10 GB, entao nao e
+# urgente, mas backup sem politica de retencao vira lixo acumulado.
+MANTER = 90
+try:
+    req = urllib.request.Request(
+        f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/r2/buckets/{BUCKET}/objects?prefix=postgres/logico_&per_page=1000")
+    req.add_header("Authorization", "Bearer " + CF)
+    objetos = json.loads(urllib.request.urlopen(req, timeout=60).read()).get("result") or []
+    antigos = sorted(objetos, key=lambda o: o["key"])[:-MANTER]
+    for o in antigos:
+        d = urllib.request.Request(
+            f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/r2/buckets/{BUCKET}/objects/{o['key']}",
+            method="DELETE")
+        d.add_header("Authorization", "Bearer " + CF)
+        urllib.request.urlopen(d, timeout=60)
+    if antigos:
+        print(f"retencao: {len(antigos)} backup(s) antigo(s) removido(s), {MANTER} mantidos")
+except Exception as e:
+    # Falha na limpeza NAO invalida o backup do dia.
+    print("aviso: retencao falhou:", e)
