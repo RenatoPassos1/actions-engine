@@ -8,11 +8,11 @@ ficam de fora de proposito: sao re-scrapaveis e inflariam o dump.
 import json, gzip, io, os, sys, urllib.request, urllib.error, datetime
 
 S = os.path.dirname(os.path.abspath(__file__))
-SBP = os.environ["SUPABASE_MGMT_TOKEN"]
-CF = os.environ["CF_TOKEN"]
-REF = os.environ.get("SUPABASE_REF", "eznfhbdkadcuyjhmcrxp")
-ACCOUNT = os.environ["CF_ACCOUNT"]
-BUCKET = os.environ.get("CF_R2_BUCKET") or "leiloai-backups"
+SBP = os.environ["SUPABASE_MGMT_TOKEN"].strip()
+CF = os.environ["CF_TOKEN"].strip()
+REF = os.environ.get("SUPABASE_REF", "eznfhbdkadcuyjhmcrxp").strip()
+ACCOUNT = os.environ["CF_ACCOUNT"].strip()
+BUCKET = (os.environ.get("CF_R2_BUCKET") or "leiloai-backups").strip()
 
 TABELAS = [
     ("auth.users", "select id,email,created_at,updated_at,last_sign_in_at,"
@@ -84,7 +84,10 @@ req = urllib.request.Request(
     data=comprimido, method="PUT")
 req.add_header("Authorization", "Bearer " + CF)
 req.add_header("Content-Type", "application/gzip")
-with urllib.request.urlopen(req, timeout=300) as resp:
-    r = json.loads(resp.read())
+try:
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        r = json.loads(resp.read())
+except urllib.error.HTTPError as e:
+    sys.exit(f"upload R2 falhou: HTTP {e.code} {e.read().decode()[:300]}")
 print("upload R2:", r.get("success"), r.get("result", {}).get("key"),
       r.get("result", {}).get("size"), "bytes")
