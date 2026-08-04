@@ -5,14 +5,18 @@ Cobre exatamente o que se perdeu no incidente de 03/08 (contas, assinaturas,
 alertas). Tabelas de raspagem (items, judicial_status, market_comparables)
 ficam de fora de proposito: sao re-scrapaveis e inflariam o dump.
 """
-import json, gzip, io, os, sys, urllib.request, urllib.error, datetime
+import json, gzip, io, os, re, sys, urllib.request, urllib.error, datetime
 
 S = os.path.dirname(os.path.abspath(__file__))
 SBP = os.environ["SUPABASE_MGMT_TOKEN"].strip()
 CF = os.environ["CF_TOKEN"].strip()
 REF = os.environ.get("SUPABASE_REF", "eznfhbdkadcuyjhmcrxp").strip()
 ACCOUNT = os.environ["CF_ACCOUNT"].strip()
-BUCKET = (os.environ.get("CF_R2_BUCKET") or "leiloai-backups").strip()
+_b = (os.environ.get("CF_R2_BUCKET") or "").strip()
+# O secret CF_R2_BUCKET contem valor invalido (a API respondeu
+# "The specified bucket name is not valid"). Cai no default em vez de
+# quebrar o backup por causa de um secret mal preenchido.
+BUCKET = _b if re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", _b or "") else "leiloai-backups"
 
 TABELAS = [
     ("auth.users", "select id,email,created_at,updated_at,last_sign_in_at,"
