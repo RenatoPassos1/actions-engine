@@ -1,0 +1,87 @@
+# LeiloAI - Backup logico diario das tabelas criticas.
+#
+# Por que existe (incidente 03/08/2026):
+#   A migracao apagou 248 contas de auth.users. O backup semanal via pg_dump
+#   existia mas gerava arquivos vazios de 20 bytes havia 4 meses (faltava
+#   pipefail e a string de conexao era invalida), entao o bucket R2 estava
+#   vazio e nao houve o que restaurar.
+#
+#   Este workflow NAO depende da senha do Postgres: usa o token de Management
+#   API (mesmo caminho do SQL Editor). Cobre exatamente o que se perde numa
+#   migracao malfeita: contas, identidades, assinaturas, alertas, fontes.
+#   Tabelas de raspagem (items, judicial_status, market_comparables) ficam de
+#   fora de proposito: sao re-scrapaveis e inflariam o backup.
+#
+# Complementa (nao substitui) o leiloai-backup-weekly.yml, que faz o pg_dump
+# completo e volta a funcionar quando a senha do banco for corrigida.
+#
+# Secrets:
+#   LEILOAI_SUPABASE_MGMT_TOKEN - token sbp_ da Management API
+#   LEILOAI_CF_TOKEN            - Cloudflare API token com R2:Edit
+#   LEILOAI_CF_ACCOUNT          - Cloudflare account ID
+#   CF_R2_BUCKET                - bucket R2 (default leiloai-backups)
+
+name: "LeiloAI: Backup Logico (tabelas criticas)"
+
+on:
+  schedule:
+    - cron: '30 5 * * *' # 05h30 UTC (02h30 BRT), depois do pg_dump das 04h
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: leiloai-backup-logico
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    # Secret vive no environment: o repo bateu o teto de 100 secrets e
+    # environment tem cota propria.
+    environment: leiloai-backup
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Roda backup logico
+        id: dump
+        env:
+          SUPABASE_MGMT_TOKEN: ${{ secrets.LEILOAI_SUPABASE_MGMT_TOKEN }}
+          CF_TOKEN: ${{ secrets.LEILOAI_CF_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.LEILOAI_CF_ACCOUNT }}
+          CF_R2_BUCKET: ${{ secrets.CF_R2_BUCKET }}
+        run: python3 scripts/leiloai_backup_logico.py
+
+      - name: Abre issue se falhou
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dia = new Date().toISOString().slice(0, 10);
+            const titulo = `[incident] backup-logico falhou ${dia}`;
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'incident',
+              state: 'open',
+              per_page: 100,
+            });
+            if (existentes.find(i => i.title === titulo)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: titulo,
+              body: [
+                'O backup logico diario nao concluiu.',
+                '',
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                '',
+                'Sem este backup, uma perda de dados fica irreversivel (foi o que',
+                'aconteceu em 03/08/2026). Tratar como incidente, nao como ruido.',
+              ].join('\n'),
+              labels: ['incident', 'leiloai-monitor'],
+            });
