@@ -1,0 +1,153 @@
+name: "LeiloAI: Sonda Playwright (diagnostico)"
+
+# Renderiza uma URL com Playwright e RELATA o que apareceu depois do JS.
+# NAO grava em banco, NAO chama /ingest, nao tem segredo de Supabase.
+#
+# Existe porque varias fontes servem HTML sem lote nenhum e so materializam os
+# cards depois do JavaScript. Antes desta sonda a unica forma de descobrir se
+# uma fonte era recuperavel era cadastrar e esperar o ciclo, o que suja o
+# acervo quando da errado.
+#
+# Roda no runner do GitHub de proposito: a VPS nao tem browser instalado, e
+# sondar da maquina do dono poria o IP residencial dele nos logs dos portais.
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "URLs separadas por espaco"
+        type: string
+        required: true
+      rolar:
+        description: "Rolar a pagina para materializar lazy-load"
+        type: boolean
+        default: true
+        required: false
+
+concurrency:
+  group: leiloai-sonda-playwright
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sondar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Instalar Playwright
+        run: |
+          npm i -D playwright@1.58.2 --no-audit --no-fund
+          npx playwright install chromium --with-deps
+
+      - name: Sondar
+        env:
+          URLS: ${{ inputs.urls }}
+          ROLAR: ${{ inputs.rolar }}
+        run: |
+          cat > sonda.mjs <<'FIM'
+          import { chromium } from "playwright";
+
+          const urls = (process.env.URLS || "").split(/\s+/).filter(Boolean);
+          const rolar = process.env.ROLAR !== "false";
+
+          // Padroes de ficha de lote, os mesmos do parser estrito do worker.
+          const FICHA = /\/(?:item|lote|lotes|imovel|imoveis|bem)\/|\/detalhes|[?&](?:id|lote|item)=\d|-(?:j|ml)\d{3,}/i;
+
+          const navegador = await chromium.launch();
+          const ctx = await navegador.newContext({
+            userAgent:
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale: "pt-BR",
+            viewport: { width: 1366, height: 900 },
+          });
+
+          for (const url of urls) {
+            const pagina = await ctx.newPage();
+            const linha = { url };
+            try {
+              const resp = await pagina.goto(url, {
+                waitUntil: "domcontentloaded",
+                timeout: 45000,
+              });
+              linha.http = resp?.status() ?? 0;
+
+              // Antes do JS assentar: serve de comparacao com o HTML cru.
+              linha.antes = await pagina.evaluate((rx) => {
+                const r = new RegExp(rx.source, rx.flags);
+                return [...document.querySelectorAll("a[href]")].filter((a) =>
+                  r.test(a.getAttribute("href") || ""),
+                ).length;
+              }, { source: FICHA.source, flags: FICHA.flags });
+
+              await pagina.waitForLoadState("networkidle", { timeout: 25000 }).catch(() => {});
+              if (rolar) {
+                for (let i = 0; i < 8; i++) {
+                  await pagina.mouse.wheel(0, 1400);
+                  await pagina.waitForTimeout(700);
+                }
+                await pagina.waitForTimeout(1500);
+              }
+
+              const r = await pagina.evaluate((rx) => {
+                const re = new RegExp(rx.source, rx.flags);
+                const fichas = [...document.querySelectorAll("a[href]")]
+                  .map((a) => a.href)
+                  .filter((h) => re.test(h));
+                const unicas = [...new Set(fichas)];
+                const texto = document.body.innerText || "";
+                const precos = (texto.match(/R\$\s*[\d.]{3,}/g) || []).length;
+                // Amostra de card: sobe do link ate um ancestral com preco.
+                let amostra = null;
+                const primeiro = [...document.querySelectorAll("a[href]")].find((a) =>
+                  re.test(a.href),
+                );
+                if (primeiro) {
+                  let n = primeiro;
+                  for (let i = 0; i < 6 && n; i++) {
+                    if (/R\$\s*[\d.]{3,}/.test(n.innerText || "")) break;
+                    n = n.parentElement;
+                  }
+                  amostra = (n?.innerText || primeiro.innerText || "")
+                    .replace(/\s+/g, " ")
+                    .slice(0, 180);
+                }
+                const imgs = [...document.querySelectorAll("img")].filter(
+                  (i) => i.currentSrc && !/data:|placeholder|no-image/i.test(i.currentSrc),
+                ).length;
+                return { fichas: unicas.length, precos, imgs, amostra, exemplo: unicas[0] || null };
+              }, { source: FICHA.source, flags: FICHA.flags });
+
+              Object.assign(linha, r);
+            } catch (e) {
+              linha.erro = String(e.message).slice(0, 90);
+            }
+            await pagina.close();
+
+            console.log(
+              `\n=== ${linha.url}`,
+              `\n    http=${linha.http ?? "-"} fichas_antes_do_js=${linha.antes ?? "-"} fichas_depois=${linha.fichas ?? "-"}`,
+              `\n    precos=${linha.precos ?? "-"} imagens=${linha.imgs ?? "-"}`,
+              linha.exemplo ? `\n    exemplo: ${linha.exemplo}` : "",
+              linha.amostra ? `\n    card: ${linha.amostra}` : "",
+              linha.erro ? `\n    ERRO: ${linha.erro}` : "",
+            );
+            // Educado com site de terceiro: nao ha pressa.
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+
+          await navegador.close();
+          FIM
+          node sonda.mjs 2>&1 | tee /tmp/sonda.txt
+
+      - name: Resumo
+        if: always()
+        run: |
+          {
+            echo "## Sonda Playwright"
+            echo
+            echo '```'
+            cat /tmp/sonda.txt 2>/dev/null | head -120
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
