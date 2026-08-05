@@ -605,14 +605,14 @@ jobs:
                     const id = idMatch?.[1] ?? idMatch?.[2] ?? idMatch?.[3] ?? idMatch?.[4] ?? href.replace(/\W+/g, "-").slice(-32);
                     // O <a> sozinho quase nunca contem a foto nem a data da praca:
                     // esses ficam no card em volta. Sobe para o card antes de extrair.
-                    const bloco = (el.closest && el.closest("article, .card, .card-imovel, .card-lote, li, .item, [class*='card'], [class*='lote'], [class*='vitrine'], [class*='thumbnail']")) || el.parentElement || el;
+                    const bloco = (el.closest && el.closest("article, .card, .card-imovel, .card-lote, li, .item")) || el.parentElement || el;
                     // Titulo obrigatorio, e este e o caminho que de fato roda hoje.
                     // Havia `?? "Lote"` aqui: card cujo titulo o seletor nao
                     // acha virava item com H1 literal "Lote", sem cidade, sem
                     // preco e sem foto. Foi assim que 36 entraram no acervo em
                     // 05/08/2026. Card que o parser nao entende nao e lote: e
                     // marcacao desconhecida, e a resposta certa e pular.
-                    const titulo = bloco.querySelector("h1,h2,h3,h4,h5,h6,[class*='titul'],[class*='title'],[class*='nome'],[class*='name'],[class*='descric']")?.textContent?.trim() ?? null;
+                    const titulo = bloco.querySelector("h1,h2,h3,h4,.titulo,.nome,.title,[class*='card-title'],[class*='lote-titulo']")?.textContent?.trim() ?? null;
                     if (!titulo || titulo.length < 6) return null;
                     const cidade = bloco.querySelector(".cidade,.municipio,.local,.city,[class*='locality']")?.textContent?.trim() ?? null;
                     const uf = bloco.querySelector(".uf,.estado")?.textContent?.trim()?.slice(0, 2) ?? null;
