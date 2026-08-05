@@ -1,0 +1,144 @@
+name: "LeiloAI: Resgate de fontes mudas"
+
+# Destrava fonte que responde HTTP 200, reporta sucesso e nunca produziu item.
+#
+# Medido em 05/08/2026: das 735 fontes ativas, 640 traziam ZERO itens e 421
+# nunca produziram nada desde o cadastro, com apenas 26 registrando erro.
+# Sondagem de 59 delas mostrou 56 respondendo 200 e a maioria servindo lote em
+# HTML: os sites funcionam, o coletor e que busca so a base_url, que na maioria
+# dos leiloeiros lista LEILOES e nao lotes.
+#
+# O worker processa UMA fonte por invocacao, porque um leiloeiro com dezenas de
+# leiloes ja consome o teto de 50 subrequests do Cloudflare Worker sozinho.
+# Por isso este workflow chama varias vezes em sequencia, com pausa.
+
+on:
+  # AGENDAMENTO DESLIGADO ATE A PRIMEIRA MEDICAO.
+  #
+  # Ligar o cron antes de olhar o resultado seria escrever no acervo dado que
+  # ninguem conferiu, que e exatamente como o catalogo acumulou os defeitos que
+  # passamos a madrugada de 05/08 medindo. A ordem certa e: rodar manual com
+  # simular=true, ler a tabela do resumo, e so entao descomentar.
+  #
+  # Quando ligar, a cadencia pensada e a de baixo: a cada 20 min, 6 fontes por
+  # execucao, o que faz a fila de ~420 completar a primeira passada em ~24h.
+  # Depois disso ela esvazia sozinha, porque metadata.resgate_em marca quem ja
+  # foi tentada.
+  #
+  # schedule:
+  #   - cron: "*/20 * * * *"
+  workflow_dispatch:
+    inputs:
+      simular:
+        description: "Simular (nao grava, so relata o que extrairia)"
+        type: boolean
+        default: true
+        required: false
+      fonte:
+        description: "ID de uma fonte especifica (vazio = pega da fila)"
+        type: string
+        required: false
+      repeticoes:
+        description: "Quantas fontes processar nesta execucao"
+        type: string
+        default: "6"
+        required: false
+
+concurrency:
+  group: leiloai-resgate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resgatar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Resgatar fontes
+        env:
+          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+          WURL: "https://leiloai-ingest-agregadores.renatopassos516.workers.dev/run"
+          # Agendado sempre grava. So o disparo manual escolhe simular, e o
+          # default do dispatch e simular=true justamente para quem clica sem
+          # ler nao escrever sem querer.
+          SIMULAR: ${{ github.event_name == 'workflow_dispatch' && inputs.simular && '1' || '0' }}
+          FONTE: ${{ inputs.fonte }}
+          REPS: ${{ inputs.repeticoes || '6' }}
+        run: |
+          set -uo pipefail
+          if [ -z "${DISPARO}" ]; then
+            echo "::error::LEILOAI_DISPARO_SECRET ausente"
+            exit 1
+          fi
+
+          n=$(printf '%s' "${REPS}" | tr -dc '0-9')
+          n=${n:-6}
+          [ "$n" -gt 20 ] && n=20   # teto de sanidade
+
+          echo "modo: $([ "$SIMULAR" = "1" ] && echo SIMULACAO || echo GRAVANDO) | fontes: $n"
+          echo '[]' > /tmp/todos.json
+          total_extraidos=0
+          total_gravados=0
+
+          for i in $(seq 1 "$n"); do
+            url="${WURL}?job=resgate"
+            [ "$SIMULAR" = "1" ] && url="${url}&simular=1"
+            [ -n "${FONTE}" ] && url="${url}&fonte=${FONTE}"
+
+            # --max-time generoso: o worker pode gastar ate 90s buscando
+            # 36 paginas de leilao. curl que desiste antes nao cancela o
+            # worker, so perde o relatorio.
+            http=$(curl -sS -o /tmp/r.json -w '%{http_code}' \
+              -H "x-disparo-secret: ${DISPARO}" \
+              -H "user-agent: leiloai-actions-engine/1.0" \
+              --max-time 150 -X POST "${url}" || echo "000")
+
+            if [ "$http" != "200" ]; then
+              echo "  [$i/$n] HTTP $http"
+              cat /tmp/r.json 2>/dev/null | head -c 300; echo
+              continue
+            fi
+
+            fonte=$(jq -r '.fonte // "?"' /tmp/r.json)
+            via=$(jq -r '.via // "?"' /tmp/r.json)
+            ext=$(jq -r '.itens_extraidos // 0' /tmp/r.json)
+            grav=$(jq -r '.gravados // 0' /tmp/r.json)
+            vazia=$(jq -r '.fila_vazia // false' /tmp/r.json)
+
+            if [ "$vazia" = "true" ]; then
+              echo "  [$i/$n] fila vazia, nada a resgatar"
+              break
+            fi
+
+            echo "  [$i/$n] ${fonte} via=${via} extraidos=${ext} gravados=${grav}"
+            total_extraidos=$((total_extraidos + ext))
+            total_gravados=$((total_gravados + grav))
+            jq -s '.[0] + [.[1]]' /tmp/todos.json /tmp/r.json > /tmp/t.json && mv /tmp/t.json /tmp/todos.json
+
+            # Pausa entre fontes: sao sites de terceiros e nao ha pressa.
+            sleep 5
+          done
+
+          {
+            echo "## Resgate de fontes"
+            echo
+            echo "modo: **$([ "$SIMULAR" = "1" ] && echo simulacao || echo gravando)**"
+            echo
+            echo "| fonte | via | extraidos | gravados |"
+            echo "|---|---|---|---|"
+            jq -r '.[] | select(.fonte) | "| \(.fonte) | \(.via // "?") | \(.itens_extraidos // 0) | \(.gravados // 0) |"' /tmp/todos.json
+            echo
+            echo "**Total: ${total_extraidos} extraidos, ${total_gravados} gravados.**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "TOTAL extraidos=${total_extraidos} gravados=${total_gravados}"
+
+      - name: Guardar relatorio
+        if: always() && hashFiles('/tmp/todos.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: resgate-${{ github.run_id }}
+          path: /tmp/todos.json
+          retention-days: 14
