@@ -101,6 +101,9 @@ jobs:
               continue
             fi
 
+            # Corpo cru: sem isto, resposta com formato inesperado vira
+            # "extraidos=0" e parece fonte sem lote, quando pode ser erro.
+            echo "      corpo: $(head -c 400 /tmp/r.json)"
             fonte=$(jq -r '.fonte // "?"' /tmp/r.json)
             via=$(jq -r '.via // "?"' /tmp/r.json)
             ext=$(jq -r '.itens_extraidos // 0' /tmp/r.json)
