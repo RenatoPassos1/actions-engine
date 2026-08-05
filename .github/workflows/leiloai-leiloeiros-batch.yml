@@ -79,6 +79,209 @@ jobs:
           cat > /tmp/lei/batch.mjs <<'EOF'
           import { chromium } from "playwright";
 
+          // Helper injetado em toda pagina (ctx.addInitScript). O $$eval nao
+          // enxerga o escopo do Node, entao a extracao de foto/praca/veiculo
+          // vive aqui e e chamada como window.__lai.extras(...).
+          // String.raw: template literal comum comeria os \d, \s das regex.
+          const HELPERS_BROWSER = String.raw`
+          window.__lai = (function () {
+            // Rejeita o que nao e foto do bem. Medido em 04/08/2026 no megaleiloes:
+            // placeholder card-no-image-320x240.png, icone auction-gavet.png (background
+            // do link "adicionar ao auditorio") e logo do banco em /bank_icons/. No
+            // sodresantoro: banner de campanha em /banners/ (foto real em /photos/).
+            var RUIM = /favicon|placeholder|sem[-_]?(foto|imagem)|no[-_]?image|nophoto|spinner|loading|blank\.|1x1|pixel|gavet|sprite|whats|facebook|instagram|youtube/i;
+            var CAMINHO_RUIM = /\/(bank_icons?|icons?|sprites?|logos?|banners?|flags?|avatars?|selos?|badges?|bandeiras?)\//i;
+            var EXT = /\.(jpe?g|png|webp|avif)(?:[?#]|$)/i;
+            var MIDIA = /\/(batches?|lotes?|bens?|imagens?|images?|fotos?|photos?|thumbs?|media|uploads?|arquivos?|storage|cdn)\//i;
+            var ATTRS = ["data-bg","data-background","data-background-image","data-src","data-original",
+                         "data-lazy","data-lazy-src","data-echo","data-image","src","data-srcset","srcset"];
+
+            function limpar(bruto, base) {
+              if (!bruto) return null;
+              // srcset vem "url 320w, url 640w": fica com a primeira URL
+              var u = String(bruto).trim().split(",")[0].trim().split(/\s+/)[0];
+              if (!u || /^(data|blob|javascript|about):/i.test(u)) return null;
+              var abs;
+              try { abs = new URL(u, base).toString(); } catch (e) { return null; }
+              if (RUIM.test(abs) || CAMINHO_RUIM.test(abs)) return null;
+              if (!EXT.test(abs) && !MIDIA.test(abs)) return null;
+              return abs;
+            }
+
+            function daCss(valor, base) {
+              if (!valor || valor === "none") return null;
+              var m = String(valor).match(/url\(\s*["']?(.*?)["']?\s*\)/i);
+              return m ? limpar(m[1], base) : null;
+            }
+
+            // A foto do card raramente e <img src>: muitos agregadores usam
+            // background-image (inline ou via lazyload em data-bg). Cobre os dois.
+            function imagens(raiz, base, max) {
+              var lim = max || 4;
+              var out = [];
+              function add(u) { if (u && out.indexOf(u) === -1 && out.length < lim) out.push(u); }
+              if (!raiz || raiz.nodeType !== 1) return out;
+              var alvos = [];
+              try {
+                alvos = Array.prototype.slice.call(raiz.querySelectorAll(
+                  "img, source, [data-bg], [data-background], [data-background-image], [data-src]," +
+                  "[class*='image'], [class*='imagem'], [class*='foto'], [class*='photo']," +
+                  "[class*='thumb'], [class*='picture'], figure, picture"
+                ));
+              } catch (e) {}
+              try { if (raiz.matches("img,[data-bg],[data-src],[class*='image'],[class*='foto'],[class*='photo'],[class*='thumb']")) alvos.unshift(raiz); } catch (e) {}
+              for (var i = 0; i < alvos.length && out.length < lim; i++) {
+                var el = alvos[i];
+                for (var a = 0; a < ATTRS.length; a++) add(limpar(el.getAttribute(ATTRS[a]), base));
+                if (el.currentSrc) add(limpar(el.currentSrc, base));
+                var st = el.getAttribute("style");
+                if (st && st.indexOf("background") !== -1) add(daCss(st, base));
+                if (!out.length) { try { add(daCss(getComputedStyle(el).backgroundImage, base)); } catch (e) {} }
+              }
+              if (!out.length) {
+                var bgs = raiz.querySelectorAll("[style*='background']");
+                for (var j = 0; j < bgs.length && !out.length; j++) add(daCss(bgs[j].getAttribute("style"), base));
+              }
+              return out;
+            }
+
+            // Do link para fora, parando no primeiro ancestral que tem foto. Sem isso
+            // o sodresantoro devolvia a foto do lote vizinho: o closest(".card, li")
+            // dele cai num container que embrulha varios lotes.
+            function imagensPerto(link, bloco, base, max) {
+              var nos = [];
+              var no = link && link.nodeType === 1 ? link : bloco;
+              for (var n = 0; n < 8 && no; n++) {
+                nos.push(no);
+                if (no === bloco) break;
+                no = no.parentElement;
+              }
+              if (bloco && nos.indexOf(bloco) === -1) nos.push(bloco);
+              for (var i = 0; i < nos.length; i++) {
+                var r = imagens(nos[i], base, max);
+                if (r.length) return r;
+              }
+              return [];
+            }
+
+            function txt(el) { return el && el.textContent ? el.textContent.replace(/\s+/g, " ").trim() : ""; }
+
+            // "R$ 28.509,60" -> 28509.6. Precisa sair do scraper ja numerico: o
+            // numOuNull do worker faz replace(",", ".") sem tirar o separador de
+            // milhar, entao "10.000,00" vira "10.000.00" -> NaN -> null.
+            function preco(t) {
+              if (t === null || t === undefined) return null;
+              if (typeof t === "number") return isFinite(t) && t > 0 ? t : null;
+              var m = String(t).replace(/\s+/g, " ").match(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+,\d{1,2}|\d+(?:\.\d{1,2})?)/);
+              if (!m) return null;
+              var b = m[1], n;
+              if (/,\d{1,2}$/.test(b)) n = Number(b.replace(/\./g, "").replace(",", "."));
+              else if (/\.\d{3}/.test(b)) n = Number(b.replace(/\./g, ""));
+              else n = Number(b);
+              return isFinite(n) && n > 0 ? n : null;
+            }
+
+            var RE_DATA = /(\d{2})\/(\d{2})\/(\d{4})(?:\s*(?:às|as|-|,)?\s*(\d{1,2})[:h](\d{2}))?/;
+            // dd/mm/aaaa [as hh:mm] -> ISO no fuso do Brasil. Sem hora, meio-dia,
+            // para nao virar o dia ao converter para UTC.
+            function iso(texto) {
+              if (!texto) return null;
+              var m = String(texto).match(RE_DATA);
+              if (!m) return null;
+              var ano = Number(m[3]);
+              if (ano < 2000 || ano > 2100) return null;
+              var h = m[4] ? ("0" + m[4]).slice(-2) : "12";
+              return m[3] + "-" + m[2] + "-" + m[1] + "T" + h + ":" + (m[5] || "00") + ":00-03:00";
+            }
+
+            // 1a/2a praca. Seletores medidos no megaleiloes
+            // (.card-first-instance-date / .card-second-instance-date, valor no
+            // .card-instance-value irmao); fallback por rotulo no texto do card serve
+            // o resto dos agregadores.
+            function pracas(raiz) {
+              var r = { primeira: null, segunda: null, lance_segunda: null };
+              if (!raiz || raiz.nodeType !== 1) return r;
+              var e1 = raiz.querySelector("[class*='first-instance-date'], .primeira-praca, .data-primeira-praca");
+              var e2 = raiz.querySelector("[class*='second-instance-date'], .segunda-praca, .data-segunda-praca");
+              r.primeira = iso(txt(e1));
+              r.segunda = iso(txt(e2));
+              if (e2 && e2.parentElement) {
+                var v = e2.parentElement.querySelector("[class*='instance-value'], .valor, .value, .preco");
+                if (v) r.lance_segunda = preco(txt(v));
+              }
+              var t = txt(raiz);
+              if (!r.primeira) {
+                var m1 = t.match(/(?:1[ª°a]?\s*pra[çc]a|primeira\s+pra[çc]a|1[ª°a]?\s*leil[ãa]o|data\s*(?:do\s*)?leil[ãa]o|abertura)\s*:?\s*([^|]{0,32})/i);
+                r.primeira = iso(m1 && m1[1]);
+              }
+              if (!r.segunda) {
+                var m2 = t.match(/(?:2[ª°a]?\s*pra[çc]a|segunda\s+pra[çc]a|2[ª°a]?\s*leil[ãa]o)\s*:?\s*([^|]{0,32})/i);
+                r.segunda = iso(m2 && m2[1]);
+              }
+              return r;
+            }
+
+            // Ano/marca/modelo so quando o item e mesmo veiculo. O card do megaleiloes
+            // nao tem campo estruturado: o dado esta no titulo
+            // ("Carro Hyundai Tucson GLSB - 2011/2012"). Sem marca reconhecida, null.
+            var MARCAS = ["Chevrolet","Volkswagen","Fiat","Ford","Toyota","Honda","Hyundai","Renault",
+              "Nissan","Peugeot","Citroën","Citroen","Jeep","Mitsubishi","Kia","Chery","Caoa","Suzuki",
+              "Subaru","BMW","Mercedes-Benz","Mercedes","Audi","Volvo","Land Rover","Jaguar","Porsche",
+              "Iveco","Scania","Agrale","Troller","JAC","Effa","Lifan","RAM","Dodge","Chrysler","Yamaha",
+              "Kawasaki","Harley-Davidson","Ducati","Triumph","Shineray","Dafra","Sundown","Traxx","Haojue",
+              "Royal Enfield","BYD","GWM","Foton","Marcopolo","Randon","New Holland","Massey Ferguson",
+              "Valtra","John Deere","Komatsu","Caterpillar","Yanmar","Hafei","Sinotruk","Mini","VW","GM"];
+            var RE_VEIC = /ve[í i]cul|carro|autom[oó]vel|motocicl|moto\b|caminh[aã]o|caminhon|[oô]nibus|reboque|trator|sucata|van\b|utilit[aá]ri|semirreboque|quadricicl|lancha|embarca/i;
+
+            function veiculo(titulo, url) {
+              var out = { year: null, brand: null, model: null };
+              var t = String(titulo || "");
+              var u = String(url || "");
+              if (!RE_VEIC.test(t) && !/\/(veiculos?|carros?|motos?|caminhoes|caminh[oõ]es|sucatas?)\//i.test(u)) return out;
+              // "2011/2012" = fabricacao/modelo: vale o ano modelo (o segundo)
+              var par = t.match(/\b(19[5-9]\d|20[0-4]\d)\s*[\/\-]\s*(19[5-9]\d|20[0-4]\d)\b/);
+              if (par) out.year = Number(par[2]);
+              if (!out.year) {
+                var so = t.match(/(?:^|[\s\-,(])(19[5-9]\d|20[0-4]\d)(?:$|[\s\-,)])/);
+                if (so) out.year = Number(so[1]);
+              }
+              var alvo = t.replace(/ë/g, "e");
+              for (var i = 0; i < MARCAS.length; i++) {
+                var marca = MARCAS[i];
+                var re = new RegExp("(?:^|[\\s\\/,.\\-(])" + marca.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&").replace(/ë/g, "e") + "(?=$|[\\s\\/,.\\-)])", "i");
+                var m = alvo.match(re);
+                if (!m) continue;
+                out.brand = marca;
+                var resto = alvo.slice(m.index + m[0].length);
+                var modelo = resto.split(/\s+[\-–]\s+|,|\||\d{4}\s*\//)[0].replace(/^[\s\/\-,.]+/, "").trim();
+                out.model = modelo ? modelo.slice(0, 60) : null;
+                break;
+              }
+              return out;
+            }
+
+            // Junta os campos novos num objeto pronto para o /ingest do worker.
+            // O parametro link (opcional) e a ancora do lote: com ela a foto sai do
+            // container mais justo, sem pegar a do vizinho.
+            function extras(raiz, base, titulo, url, link) {
+              var imgs = imagensPerto(link, raiz, base, 4);
+              var p = pracas(raiz);
+              var v = veiculo(titulo, url);
+              return {
+                images: imgs.length ? imgs : null,
+                first_auction_at: p.primeira,
+                second_auction_at: p.segunda,
+                second_bid: p.lance_segunda,
+                year: v.year,
+                brand: v.brand,
+                model: v.model,
+              };
+            }
+
+            return { imagens: imagens, imagensPerto: imagensPerto, pracas: pracas, veiculo: veiculo, extras: extras, iso: iso, preco: preco };
+          })();
+          `;
+
           const AGG = process.env.AGREGADORES_URL;
           const DISPARO = process.env.DISPARO;
           const SB_URL = process.env.SUPABASE_URL;
@@ -130,6 +333,7 @@ jobs:
             viewport: { width: 1366, height: 900 },
             bypassCSP: true,
           });
+          await ctx.addInitScript({ content: HELPERS_BROWSER });
 
           const resumo = {ok:0, vazios:0, erros:0, total_inseridos:0, detalhes:[]};
 
@@ -148,16 +352,28 @@ jobs:
               if (!/imov|leilo|lote|busca|search|catalog|propert|ativo/i.test(resp.url())) return;
               try { respJSON.push(await resp.json()); } catch {}
             });
-            await page.route(/\.(woff2?|ttf|otf|eot)$/i, r => r.abort());
+            // Abortar as fontes economizava alguns KB mas ligava a interceptacao
+            // de requests da pagina inteira, e ai o SPA do sodresantoro nao
+            // renderizava lote nenhum: 0 link de lote e 0 foto, reproduzido 2x em
+            // 04/08/2026, contra 48 lotes e 96 fotos com a rota desligada.
+            // ATENCAO: sozinho isso ainda nao destrava o sodresantoro. O
+            // `await resp.json()` dentro do page.on("response") logo abaixo trava
+            // o SPA do mesmo jeito (medido isoladamente). Enquanto os dois nao
+            // sairem, aquela fonte continua devolvendo so link de menu.
+            // await page.route(/\.(woff2?|ttf|otf|eot)$/i, r => r.abort());
 
             let items = [];
             let erro = null;
             try {
               await page.goto(fonte.base_url, { timeout: TIMEOUT_PAGE_MS, waitUntil: "domcontentloaded" });
-              // Aguarda 3s para carregar cards iniciais + scroll para lazy
+              // Aguarda 3s para carregar cards iniciais + scroll para lazy.
+              // O scroll e gradual, nao um pulo para o rodape: o lazyload so
+              // carrega a foto do card que passa pela viewport. Medido no
+              // sodresantoro: pulando para o fim, 36 items e 0 fotos; passando
+              // de 1/4 em 1/4, 125 items e 96 fotos, no mesmo tempo.
               await page.waitForTimeout(2500);
-              for (let s = 0; s < 4; s++) {
-                await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+              for (let s = 1; s <= 4; s++) {
+                await page.evaluate((n) => window.scrollTo(0, (document.body.scrollHeight / 4) * n), s);
                 await page.waitForTimeout(400);
               }
 
@@ -186,17 +402,28 @@ jobs:
                       const texto = (bloco.textContent || "").trim().replace(/\s+/g, " ");
                       if (texto.length < 20) continue;
                       if (!/leil|lote|imov|ve[ií]cul|apart|casa|terreno|arremat|edital/i.test(texto)) continue;
-                      const titulo = (bloco.querySelector("h1,h2,h3,h4,.titulo,.nome,.title,strong")?.textContent || "").trim() || texto.slice(0, 100);
-                      const cidadeUf = (bloco.querySelector(".cidade,.local,.municipio,.city,.endereco,address")?.textContent || "").trim();
-                      const preco = (bloco.querySelector(".preco,.valor,.lance,.lance-minimo,.price,[class*=valor],[class*=preco]")?.textContent || "").trim();
+                      // card-title / card-locality / card-price (megaleiloes) nao casavam
+                      // com .title/.local/.price: o titulo caia no fallback texto.slice(0,100)
+                      // ("30%abaixo na2a praca R$ 28.509,60 2775 0 Carro Hyundai...") e
+                      // cidade/uf/preco vinham vazios.
+                      const titulo = (bloco.querySelector("h1,h2,h3,h4,.titulo,.nome,.title,[class*='card-title'],[class*='lote-titulo'],strong")?.textContent || "").trim() || texto.slice(0, 100);
+                      const cidadeUf = (bloco.querySelector(".cidade,.local,.municipio,.city,.endereco,address,[class*='locality']")?.textContent || "").trim();
+                      const preco = (bloco.querySelector(".preco,.valor,.lance,.lance-minimo,.price,[class*=valor],[class*=preco],[class*=price],[class*=lance]")?.textContent || "").trim();
                       const m = cidadeUf.match(/([A-ZÇÀÁÂÃÉÊÍÓÔÕÚÜ][a-zçàáâãéêíóôõúü\s]+)\s*[-–\/,]\s*([A-Z]{2})/);
+                      // foto (background-image/data-bg/img), 1a e 2a praca, segundo lance
+                      // e ano/marca/modelo. Sem o helper (init script bloqueado), segue
+                      // mandando os campos antigos em vez de quebrar a extracao.
+                      const extras = window.__lai ? window.__lai.extras(bloco, location.href, titulo, href, el) : {};
                       out.push({
                         id: href.replace(/\W+/g, "-").slice(-40),
                         titulo: titulo.slice(0, 200),
                         cidade: m?.[1]?.trim() || null,
                         uf: m?.[2] || null,
-                        lance_minimo: preco,
+                        // numero, nao texto: numOuNull do worker devolve NaN->null
+                        // para "R$ 28.509,60" (nao remove o separador de milhar)
+                        lance_minimo: window.__lai ? window.__lai.preco(preco) : preco,
                         url: href,
+                        ...extras,
                       });
                       if (out.length >= 400) break;
                     }
@@ -207,8 +434,8 @@ jobs:
 
               // 3c) scroll extra mais agressivo se pouco items (lazy load)
               if (items.length < 10 && items.length > 0) {
-                for (let s = 0; s < 8; s++) {
-                  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                for (let s = 1; s <= 8; s++) {
+                  await page.evaluate((n) => window.scrollTo(0, (document.body.scrollHeight / 8) * n), s);
                   await page.waitForTimeout(600);
                 }
                 // retenta DOM
@@ -222,7 +449,10 @@ jobs:
                       if (!href || href === "#" || href.startsWith("javascript:")) continue;
                       if (vistos.has(href)) continue;
                       vistos.add(href);
-                      out.push({ id: href.replace(/\W+/g, "-").slice(-40), titulo: (el.textContent||"").trim().slice(0,200), url: href });
+                      const bloco = el.closest("article, .card, .card-imovel, .card-lote, li, .item") || el.parentElement || el;
+                      const titulo = (el.textContent||"").trim().slice(0,200);
+                      const extras = window.__lai ? window.__lai.extras(bloco, location.href, titulo, href, el) : {};
+                      out.push({ id: href.replace(/\W+/g, "-").slice(-40), titulo, url: href, ...extras });
                       if (out.length >= 400) break;
                     }
                     return out;
@@ -317,9 +547,29 @@ jobs:
               lance_minimo: raw.lanceMinimo ?? raw.valorMinimo ?? raw.preco ?? raw.valor ?? raw.lance ?? null,
               avaliacao: raw.avaliacao ?? raw.valorAvaliacao ?? null,
               edital_pdf_url: raw.editalUrl ?? raw.urlEdital ?? null,
+              // API interna tambem publica foto e praca: repassa em vez de descartar
+              images: imagensDaAPI(raw, url),
+              first_auction_at: raw.primeiraPraca ?? raw.dataPrimeiraPraca ?? raw.dataLeilao ?? raw.data_leilao ?? raw.startDate ?? null,
+              second_auction_at: raw.segundaPraca ?? raw.dataSegundaPraca ?? raw.data_segunda_praca ?? null,
+              second_bid: raw.lanceSegunda ?? raw.valorSegundaPraca ?? raw.segundoLance ?? null,
+              year: raw.ano ?? raw.anoModelo ?? raw.year ?? null,
+              brand: raw.marca ?? raw.brand ?? null,
+              model: raw.modelo ?? raw.model ?? null,
               url,
               raw_payload: { host },
             };
+          }
+          /** Achata os varios formatos de foto que as APIs internas usam. */
+          function imagensDaAPI(raw, base) {
+            const bruto = raw.images ?? raw.imagens ?? raw.fotos ?? raw.photos ?? raw.foto ?? raw.imagem ?? raw.thumbnail ?? raw.thumb ?? null;
+            if (!bruto) return null;
+            const lista = (Array.isArray(bruto) ? bruto : [bruto])
+              .map((x) => (typeof x === "string" ? x : x?.url ?? x?.src ?? x?.link ?? x?.path ?? null))
+              .filter((x) => typeof x === "string" && x && !/^data:/i.test(x) && !/no-?image|placeholder|sem-?foto/i.test(x))
+              .map((x) => { try { return new URL(x, base).toString(); } catch { return null; } })
+              .filter(Boolean)
+              .slice(0, 6);
+            return lista.length ? lista : null;
           }
           async function marcarRun(id, ok, erro) {
             await fetch(`${SB_URL}/rest/v1/sources?id=eq.${id}`, {
