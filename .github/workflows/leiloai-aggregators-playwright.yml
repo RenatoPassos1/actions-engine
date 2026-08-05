@@ -66,6 +66,21 @@ jobs:
           // Cada scraper define como navegar e extrair cards do site.
           // Strategy: abre URL, espera networkidle + selector, intercepta
           // responses JSON internas, extrai DOM, combina e POSTa.
+          // URLs conferidas pela sonda Playwright em 05/08/2026. Quatro das
+          // seis estavam MORTAS e ninguem viu, porque "0 items extraidos" passa
+          // por resultado normal no log:
+          //   frazaoleiloes.com.br/imoveis          404  -> /leiloes            20 fichas
+          //   biasileiloes.com.br/imoveis           404  -> /leiloes/itau       48 fichas
+          //   portalzuk.com.br/imoveis-em-leilao    404  -> /leilao-de-imoveis  30 fichas
+          //   sodresantoro.com.br/leiloes           200 mas e pagina de
+          //                                         destaques -> /imoveis/lotes 62 fichas
+          //   nucleoleiloes.com.br/imoveis          403 (bloqueio), sem alternativa ainda
+          //
+          // biasi ficou na pagina do Itau porque /leiloes responde 404 e essa e
+          // a unica que devolve lote hoje. Cobre menos que o site inteiro.
+          //
+          // Antes de trocar qualquer URL aqui, rodar a sonda: ela diz http,
+          // quantas fichas aparecem depois do JS e qual a forma do caminho.
           const SCRAPERS = [
             {
               source_id: "agg-nucleo",
@@ -77,7 +92,7 @@ jobs:
             {
               source_id: "agg-sodre",
               name: "Sodré Santoro",
-              url: "https://www.sodresantoro.com.br/leiloes",
+              url: "https://www.sodresantoro.com.br/imoveis/lotes",
               waitSelector: "a[href*='/leilao/'], .card-leilao, .item-leilao",
               extract: extractSodre,
             },
@@ -91,14 +106,14 @@ jobs:
             {
               source_id: "agg-zuk",
               name: "Portal Zuk",
-              url: "https://www.portalzuk.com.br/imoveis-em-leilao",
+              url: "https://www.portalzuk.com.br/leilao-de-imoveis",
               waitSelector: "a[href*='/imovel'], .card-imovel, .property-card",
               extract: extractZuk,
             },
             {
               source_id: "agg-frazao",
               name: "Frazão Leilões",
-              url: "https://www.frazaoleiloes.com.br/imoveis",
+              url: "https://www.frazaoleiloes.com.br/leiloes",
               waitSelector: "a[href*='/lote/'], .card-lote, .item-lote",
               extract: extractFrazao,
             },
@@ -112,7 +127,7 @@ jobs:
             {
               source_id: "agg-biasi",
               name: "Biasi Leilões",
-              url: "https://www.biasileiloes.com.br/imoveis",
+              url: "https://www.biasileiloes.com.br/leiloes/itau",
               waitSelector: "a[href*='/lote/'], .card-lote, .item-lote",
               extract: extractGenerico,
             },
@@ -531,12 +546,12 @@ jobs:
 
           const SCRAPERS = [
             { source_id: "agg-nucleo", url: "https://www.nucleoleiloes.com.br/imoveis", host: "nucleoleiloes.com.br", waitSelector: "a[href*='/imovel/'], .card" },
-            { source_id: "agg-sodre", url: "https://www.sodresantoro.com.br/leiloes", host: "sodresantoro.com.br", waitSelector: "a[href*='/leilao/'], .card-leilao, .item-leilao" },
+            { source_id: "agg-sodre", url: "https://www.sodresantoro.com.br/imoveis/lotes", host: "sodresantoro.com.br", waitSelector: "a[href*='/leilao/'], .card-leilao, .item-leilao" },
             { source_id: "agg-mega", url: "https://www.megaleiloes.com.br/imoveis", host: "megaleiloes.com.br", waitSelector: "a[href*='/imoveis/'], .card-lote, .lote-item" },
-            { source_id: "agg-zuk", url: "https://www.portalzuk.com.br/imoveis-em-leilao", host: "portalzuk.com.br", waitSelector: "a[href*='/imovel'], .card-imovel, .property-card" },
-            { source_id: "agg-frazao", url: "https://www.frazaoleiloes.com.br/imoveis", host: "frazaoleiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
+            { source_id: "agg-zuk", url: "https://www.portalzuk.com.br/leilao-de-imoveis", host: "portalzuk.com.br", waitSelector: "a[href*='/imovel'], .card-imovel, .property-card" },
+            { source_id: "agg-frazao", url: "https://www.frazaoleiloes.com.br/leiloes", host: "frazaoleiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
             { source_id: "agg-hasta", url: "https://www.hastaleiloes.com.br/imoveis", host: "hastaleiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
-            { source_id: "agg-biasi", url: "https://www.biasileiloes.com.br/imoveis", host: "biasileiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
+            { source_id: "agg-biasi", url: "https://www.biasileiloes.com.br/leiloes/itau", host: "biasileiloes.com.br", waitSelector: "a[href*='/lote/'], .card-lote" },
           ];
 
           const ativos = SCRAPERS.filter((s) =>
