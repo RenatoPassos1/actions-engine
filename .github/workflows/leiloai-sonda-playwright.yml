@@ -6,7 +6,7 @@ name: "LeiloAI: Sonda Playwright (diagnostico)"
 # Existe porque varias fontes servem HTML sem lote nenhum e so materializam os
 # cards depois do JavaScript. Antes desta sonda a unica forma de descobrir se
 # uma fonte era recuperavel era cadastrar e esperar o ciclo, o que suja o
-# acervo quando da errado.
+# acervo quando da errado, e foi assim que 46 itens com titulo "Lote" entraram.
 #
 # Roda no runner do GitHub de proposito: a VPS nao tem browser instalado, e
 # sondar da maquina do dono poria o IP residencial dele nos logs dos portais.
@@ -46,7 +46,7 @@ jobs:
           URLS: ${{ inputs.urls }}
           ROLAR: ${{ inputs.rolar }}
         run: |
-          cat > sonda.mjs <<'FIM'
+          cat > sonda.mjs <<'FIMDOSCRIPT'
           import { chromium } from "playwright";
 
           const urls = (process.env.URLS || "").split(/\s+/).filter(Boolean);
@@ -66,6 +66,18 @@ jobs:
           for (const url of urls) {
             const pagina = await ctx.newPage();
             const linha = { url };
+
+            // Respostas JSON que a pagina busca sozinha. E por elas que varias
+            // fontes carregam os lotes, e sem ver isso a sonda so consegue
+            // dizer "nao achei", sem dizer por onde procurar.
+            const apis = [];
+            pagina.on("response", (r) => {
+              const ct = r.headers()["content-type"] || "";
+              if (/json/i.test(ct) && r.request().resourceType() !== "document") {
+                apis.push(r.status() + " " + r.url().slice(0, 110));
+              }
+            });
+
             try {
               const resp = await pagina.goto(url, {
                 waitUntil: "domcontentloaded",
@@ -92,13 +104,33 @@ jobs:
 
               const r = await pagina.evaluate((rx) => {
                 const re = new RegExp(rx.source, rx.flags);
-                const fichas = [...document.querySelectorAll("a[href]")]
-                  .map((a) => a.href)
-                  .filter((h) => re.test(h));
-                const unicas = [...new Set(fichas)];
+                const unicas = [
+                  ...new Set(
+                    [...document.querySelectorAll("a[href]")]
+                      .map((a) => a.href)
+                      .filter((h) => re.test(h)),
+                  ),
+                ];
                 const texto = document.body.innerText || "";
                 const precos = (texto.match(/R\$\s*[\d.]{3,}/g) || []).length;
-                // Amostra de card: sobe do link ate um ancestral com preco.
+
+                // FORMAS de caminho, com numero trocado por N. Uma lista de
+                // formas diz ONDE estao os lotes; a primeira URL sozinha so diz
+                // qual link veio primeiro no DOM, que costuma ser menu, e foi
+                // assim que a sonda insistiu em /lotes/favoritos no Sodre.
+                const formas = {};
+                for (const h of unicas) {
+                  try {
+                    const f = new URL(h).pathname.replace(/\d+/g, "N").replace(/\/$/, "");
+                    formas[f] = (formas[f] || 0) + 1;
+                  } catch {}
+                }
+                const top = Object.entries(formas)
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 6)
+                  .map((e) => e[1] + "x " + e[0]);
+
+                // Amostra: sobe do link ate um ancestral com preco.
                 let amostra = null;
                 const primeiro = [...document.querySelectorAll("a[href]")].find((a) =>
                   re.test(a.href),
@@ -111,12 +143,12 @@ jobs:
                   }
                   amostra = (n?.innerText || primeiro.innerText || "")
                     .replace(/\s+/g, " ")
-                    .slice(0, 180);
+                    .slice(0, 170);
                 }
                 const imgs = [...document.querySelectorAll("img")].filter(
                   (i) => i.currentSrc && !/data:|placeholder|no-image/i.test(i.currentSrc),
                 ).length;
-                return { fichas: unicas.length, precos, imgs, amostra, exemplo: unicas[0] || null };
+                return { fichas: unicas.length, precos, imgs, amostra, formas: top };
               }, { source: FICHA.source, flags: FICHA.flags });
 
               Object.assign(linha, r);
@@ -125,20 +157,25 @@ jobs:
             }
             await pagina.close();
 
-            console.log(
-              `\n=== ${linha.url}`,
-              `\n    http=${linha.http ?? "-"} fichas_antes_do_js=${linha.antes ?? "-"} fichas_depois=${linha.fichas ?? "-"}`,
-              `\n    precos=${linha.precos ?? "-"} imagens=${linha.imgs ?? "-"}`,
-              linha.exemplo ? `\n    exemplo: ${linha.exemplo}` : "",
-              linha.amostra ? `\n    card: ${linha.amostra}` : "",
-              linha.erro ? `\n    ERRO: ${linha.erro}` : "",
-            );
+            const partes = [
+              "=== " + linha.url,
+              "    http=" + (linha.http ?? "-") +
+                " fichas_antes_do_js=" + (linha.antes ?? "-") +
+                " fichas_depois=" + (linha.fichas ?? "-"),
+              "    precos=" + (linha.precos ?? "-") + " imagens=" + (linha.imgs ?? "-"),
+            ];
+            if (linha.formas?.length) partes.push("    formas: " + linha.formas.join(" | "));
+            if (apis.length) partes.push("    apis: " + apis.slice(0, 5).join(" | "));
+            if (linha.amostra) partes.push("    card: " + linha.amostra);
+            if (linha.erro) partes.push("    ERRO: " + linha.erro);
+            console.log(partes.join("\n") + "\n");
+
             // Educado com site de terceiro: nao ha pressa.
             await new Promise((r) => setTimeout(r, 3000));
           }
 
           await navegador.close();
-          FIM
+          FIMDOSCRIPT
           node sonda.mjs 2>&1 | tee /tmp/sonda.txt
 
       - name: Resumo
@@ -148,6 +185,6 @@ jobs:
             echo "## Sonda Playwright"
             echo
             echo '```'
-            cat /tmp/sonda.txt 2>/dev/null | head -120
+            cat /tmp/sonda.txt 2>/dev/null | head -140
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
