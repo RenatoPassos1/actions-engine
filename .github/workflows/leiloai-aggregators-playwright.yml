@@ -135,15 +135,32 @@ jobs:
             console.log(`\n=== ${sc.source_id} ===`);
             const page = await ctx.newPage();
             const responsesAPI = [];
-            page.on("response", async (resp) => {
+            // Guarda a PROMESSA, nao o resultado. O Playwright NAO aguarda
+            // handler de evento, entao ler o corpo aqui e correr contra o
+            // extrator: as vezes a resposta chega a tempo, as vezes nao, e o
+            // catch vazio engolia a diferenca. Corrida silenciosa e pior que
+            // erro, porque some do log e reaparece como dado ruim.
+            const corposPendentes = [];
+            const hostDaFonte = (() => {
+              try { return new URL(sc.url).host.replace(/^www\./, ""); } catch { return ""; }
+            })();
+            page.on("response", (resp) => {
               const url = resp.url();
               const ct = resp.headers()["content-type"] ?? "";
               if (!ct.includes("json")) return;
-              if (!/imov|leilo|lote|search|busca|propert/i.test(url)) return;
+              // So o proprio host. Sem isto, JSON de analytics de terceiro
+              // entra na fila: a sonda do Sodre mostrou useinsider.com sendo
+              // carregado, e um array vindo de la viraria "lote".
               try {
-                const body = await resp.json();
-                responsesAPI.push({ url, body });
-              } catch {}
+                if (!new URL(url).host.replace(/^www\./, "").endsWith(hostDaFonte)) return;
+              } catch { return; }
+              if (!/imov|leilo|lote|search|busca|propert/i.test(url)) return;
+              corposPendentes.push(
+                resp.json().then(
+                  (body) => responsesAPI.push({ url, body }),
+                  () => {},
+                ),
+              );
             });
 
             try {
@@ -158,6 +175,9 @@ jobs:
                 await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
                 await page.waitForTimeout(700);
               }
+              // Sem este await o extrator le um array que ainda esta sendo
+              // preenchido, e o resultado muda a cada execucao.
+              await Promise.allSettled(corposPendentes);
               const items = await sc.extract(page, responsesAPI);
               console.log(`${sc.source_id}: ${items.length} items extraídos`);
 
@@ -262,9 +282,15 @@ jobs:
             const id = String(r.id ?? r.idImovel ?? r.codigo ?? r.numero ?? r.slug ?? "");
             if (!id) return null;
             const url = String(r.url ?? r.permalink ?? r.link ?? `/imovel/${id}`);
+            // Titulo obrigatorio. Havia `?? "Lote"` aqui, e foi por ele que 36
+            // itens entraram no acervo em 05/08/2026 com H1 literal "Lote",
+            // sem cidade, sem preco e sem foto: quando o corpo da API nao tem
+            // titulo, o registro nao descreve nada e nao deve virar pagina.
+            const tituloReal = r.titulo ?? r.nome ?? r.title ?? r.descricao ?? null;
+            if (!tituloReal || String(tituloReal).trim().length < 6) return null;
             return {
               id,
-              titulo: r.titulo ?? r.nome ?? r.title ?? r.descricao ?? "Lote",
+              titulo: tituloReal,
               descricao: r.descricao ?? r.description ?? null,
               uf: r.uf ?? r.estado ?? r.state ?? null,
               cidade: r.cidade ?? r.municipio ?? r.city ?? null,
@@ -580,7 +606,14 @@ jobs:
                     // O <a> sozinho quase nunca contem a foto nem a data da praca:
                     // esses ficam no card em volta. Sobe para o card antes de extrair.
                     const bloco = (el.closest && el.closest("article, .card, .card-imovel, .card-lote, li, .item")) || el.parentElement || el;
-                    const titulo = bloco.querySelector("h1,h2,h3,h4,.titulo,.nome,.title,[class*='card-title'],[class*='lote-titulo']")?.textContent?.trim() ?? "Lote";
+                    // Titulo obrigatorio, e este e o caminho que de fato roda hoje.
+                    // Havia `?? "Lote"` aqui: card cujo titulo o seletor nao
+                    // acha virava item com H1 literal "Lote", sem cidade, sem
+                    // preco e sem foto. Foi assim que 36 entraram no acervo em
+                    // 05/08/2026. Card que o parser nao entende nao e lote: e
+                    // marcacao desconhecida, e a resposta certa e pular.
+                    const titulo = bloco.querySelector("h1,h2,h3,h4,.titulo,.nome,.title,[class*='card-title'],[class*='lote-titulo']")?.textContent?.trim() ?? null;
+                    if (!titulo || titulo.length < 6) return null;
                     const cidade = bloco.querySelector(".cidade,.municipio,.local,.city,[class*='locality']")?.textContent?.trim() ?? null;
                     const uf = bloco.querySelector(".uf,.estado")?.textContent?.trim()?.slice(0, 2) ?? null;
                     const valor = bloco.querySelector(".valor,.preco,.lance,.lance-minimo,.price,[class*=price],[class*=lance]")?.textContent?.trim() ?? null;
@@ -641,9 +674,15 @@ jobs:
             const id = String(r.id ?? r.idImovel ?? r.codigo ?? r.numero ?? r.slug ?? "");
             if (!id) return null;
             const url = String(r.url ?? r.permalink ?? r.link ?? `/imovel/${id}`);
+            // Titulo obrigatorio. Havia `?? "Lote"` aqui, e foi por ele que 36
+            // itens entraram no acervo em 05/08/2026 com H1 literal "Lote",
+            // sem cidade, sem preco e sem foto: quando o corpo da API nao tem
+            // titulo, o registro nao descreve nada e nao deve virar pagina.
+            const tituloReal = r.titulo ?? r.nome ?? r.title ?? r.descricao ?? null;
+            if (!tituloReal || String(tituloReal).trim().length < 6) return null;
             return {
               id,
-              titulo: r.titulo ?? r.nome ?? r.title ?? r.descricao ?? "Lote",
+              titulo: tituloReal,
               descricao: r.descricao ?? r.description ?? null,
               uf: r.uf ?? r.estado ?? r.state ?? null,
               cidade: r.cidade ?? r.municipio ?? r.city ?? null,
