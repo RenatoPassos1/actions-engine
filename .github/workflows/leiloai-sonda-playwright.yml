@@ -130,6 +130,41 @@ jobs:
                   .slice(0, 6)
                   .map((e) => e[1] + "x " + e[0]);
 
+                // ESTRUTURA do card do lote mais frequente. E o que permite
+                // escrever o seletor certo: sem isto a sonda diz "achei 62
+                // fichas" e nao diz como ler nenhuma delas.
+                //
+                // Escolhe o link da forma de caminho MAIS COMUM, nao o
+                // primeiro do DOM: o primeiro costuma ser menu.
+                const formaTop = Object.entries(formas).sort((a, b) => b[1] - a[1])[0]?.[0];
+                let estrutura = null;
+                const doTipoTop = [...document.querySelectorAll("a[href]")].find((a) => {
+                  if (!re.test(a.href)) return false;
+                  try {
+                    return new URL(a.href).pathname.replace(/\d+/g, "N").replace(/\/$/, "") === formaTop;
+                  } catch { return false; }
+                });
+                if (doTipoTop) {
+                  let card = doTipoTop;
+                  for (let i = 0; i < 7 && card; i++) {
+                    if (/R\$\s*[\d.]{3,}/.test(card.innerText || "")) break;
+                    card = card.parentElement;
+                  }
+                  card = card || doTipoTop;
+                  const desc = (el) =>
+                    el.tagName.toLowerCase() +
+                    (el.className && typeof el.className === "string"
+                      ? "." + el.className.trim().split(/\s+/).slice(0, 3).join(".")
+                      : "");
+                  estrutura = {
+                    card: desc(card),
+                    titulos: [...card.querySelectorAll("h1,h2,h3,h4,h5,[class*=titul],[class*=title],[class*=nome],[class*=name]")]
+                      .slice(0, 4)
+                      .map((e) => desc(e) + " => " + (e.textContent || "").replace(/\s+/g, " ").trim().slice(0, 46)),
+                    texto: (card.innerText || "").replace(/\s+/g, " ").slice(0, 170),
+                  };
+                }
+
                 // Amostra: sobe do link ate um ancestral com preco.
                 let amostra = null;
                 const primeiro = [...document.querySelectorAll("a[href]")].find((a) =>
@@ -148,7 +183,7 @@ jobs:
                 const imgs = [...document.querySelectorAll("img")].filter(
                   (i) => i.currentSrc && !/data:|placeholder|no-image/i.test(i.currentSrc),
                 ).length;
-                return { fichas: unicas.length, precos, imgs, amostra, formas: top };
+                return { fichas: unicas.length, precos, imgs, amostra, formas: top, estrutura };
               }, { source: FICHA.source, flags: FICHA.flags });
 
               Object.assign(linha, r);
@@ -166,6 +201,11 @@ jobs:
             ];
             if (linha.formas?.length) partes.push("    formas: " + linha.formas.join(" | "));
             if (apis.length) partes.push("    apis: " + apis.slice(0, 5).join(" | "));
+            if (linha.estrutura) {
+              partes.push("    CARD: " + linha.estrutura.card);
+              for (const t of linha.estrutura.titulos) partes.push("      titulo> " + t);
+              partes.push("      texto> " + linha.estrutura.texto);
+            }
             if (linha.amostra) partes.push("    card: " + linha.amostra);
             if (linha.erro) partes.push("    ERRO: " + linha.erro);
             console.log(partes.join("\n") + "\n");
