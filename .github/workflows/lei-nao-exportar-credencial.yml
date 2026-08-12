@@ -1,0 +1,41 @@
+name: "LEI: nenhuma credencial vira saida"
+
+# Este repositorio e PUBLICO de proposito: minuto de Actions em repo publico e
+# ilimitado, e essa e a razao de ele existir assim. A contrapartida e que log
+# de run e artefato daqui sao LEITURA ABERTA (o log dispensa ate estar logado),
+# e bot de varredura de segredo le os dois o dia inteiro.
+#
+# Em 25/06/2026 um workflow daqui publicou o .env.production inteiro da
+# producao do LeiloAI: 2.224 bytes com service role do banco, chave da Stripe,
+# chaves da Brevo, os quatro segredos internos e o salt de IP. Ficou 48 dias
+# baixavel. O repositorio JA TINHA secret scanning e push protection ligados, e
+# as duas passaram batido, porque elas procuram segredo ESCRITO NO COMMIT, e
+# ali nao havia segredo nenhum: havia um comando que ia BUSCAR o segredo em
+# tempo de execucao.
+#
+# Por isso esta trava e sobre o padrao do COMANDO, e nao sobre o valor. Ela e a
+# unica coisa que enxerga essa classe de defeito.
+#
+# Vale para qualquer autor, humano ou agente (Claude, Gemini, Antigravity,
+# Codex, Copilot). Agente commita com a identidade git de quem o roda, entao
+# autoria nao distingue nada e a trava nao tenta distinguir: ela le o diff.
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  varredura:
+    name: Nenhum caminho de credencial para a saida
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Varrer workflows e scripts
+        run: bash .github/scripts/proibir-exfiltracao.sh
