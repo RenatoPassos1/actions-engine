@@ -35,7 +35,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # `fetch-depth: 0` porque a trava precisa do diff para separar linha nova
+      # de passivo. Com o clone raso padrao ela nao acha a base e reprova tudo,
+      # que e o lado seguro do erro, mas nao e o comportamento util.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Definir a base do diff
+        id: base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          ANTES: ${{ github.event.before }}
+          PADRAO: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            echo "valor=origin/$BASE_REF" >> "$GITHUB_OUTPUT"
+          elif [ -n "$ANTES" ] && [ "$ANTES" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "$ANTES^{commit}" 2>/dev/null; then
+            echo "valor=$ANTES" >> "$GITHUB_OUTPUT"
+          else
+            echo "valor=origin/$PADRAO" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Varrer workflows e scripts
+        env:
+          DIFF_BASE: ${{ steps.base.outputs.valor }}
         run: bash .github/scripts/proibir-exfiltracao.sh
