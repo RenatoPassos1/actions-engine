@@ -43,8 +43,65 @@ done < <(
     -not -path "./.git/*" 2>/dev/null | sort
 )
 
+# --------------------------------------------------------------------------
+# LINHA NOVA REPROVA; LINHA ANTIGA SO AVISA.
+#
+# Isto nao e frouxidao, e a diferenca entre uma lei que entra em vigor hoje e
+# uma que alguem apaga na primeira sexta-feira. Medido ao ligar esta trava no
+# repositorio real: 25 acusacoes ja existentes, espalhadas por workflows de
+# SEIS projetos diferentes, a maioria do mesmo `echo "${{ secrets.X }}" |
+# base64 -d > ~/.ssh/chave` copiado de um para o outro. Reprovar tudo de uma
+# vez travaria o deploy de todo mundo, e o desfecho previsivel seria remover a
+# trava, nao consertar os 25.
+#
+# Entao: o que o diff INTRODUZ reprova. O passivo aparece como aviso, com
+# contagem, e some a medida que cada workflow for tocado.
+#
+# `DIFF_BASE` vem do workflow: a base do PR, ou o commit anterior no push.
+# Sem ela (execucao local, ou historico raso), NAO ha como saber o que e novo,
+# e ai tudo reprova. E o lado seguro do erro: a trava nunca deixa passar por
+# nao saber.
+NOVAS=""
+DIFF_OK=0
+if [ -n "${DIFF_BASE:-}" ] && git rev-parse --verify "${DIFF_BASE}" >/dev/null 2>&1 &&
+   git merge-base "${DIFF_BASE}" HEAD >/dev/null 2>&1; then
+  DIFF_OK=1
+  NOVAS="$(
+    git diff --unified=0 "${DIFF_BASE}...HEAD" 2>/dev/null |
+    awk '
+      /^\+\+\+ b\// { arquivo = substr($0, 7); next }
+      /^@@ / {
+        # @@ -a,b +c,d @@  ->  as linhas adicionadas comecam em c
+        match($0, /\+[0-9]+(,[0-9]+)?/)
+        campo = substr($0, RSTART + 1, RLENGTH - 1)
+        split(campo, p, ",")
+        inicio = p[1] + 0
+        qtd = (p[2] == "" ? 1 : p[2] + 0)
+        for (i = 0; i < qtd; i++) print "./" arquivo ":" (inicio + i)
+      }
+    '
+  )"
+fi
+
+if [ "$DIFF_OK" = "1" ]; then
+  echo "Base do diff: ${DIFF_BASE} ($(printf '%s\n' "$NOVAS" | grep -c . ) linha(s) nova(s)). Linha nova reprova; passivo avisa."
+else
+  echo "MODO ESTRITO: sem base de diff utilizavel${DIFF_BASE:+ (${DIFF_BASE})}, entao TUDO reprova."
+  echo "Se isto e um run de CI, o checkout precisa de fetch-depth: 0."
+fi
+echo
+
 acusar() {
   local arquivo="$1" linha="$2" regra="$3" trecho="$4"
+  # `printf %s` na comparacao evita casar "arq:1" com "arq:12".
+  if [ "$DIFF_OK" = "1" ] && ! printf '%s\n' "$NOVAS" | grep -qxF "${arquivo}:${linha}"; then
+    echo "::warning file=${arquivo},line=${linha}::[passivo, nao introduzido neste diff] ${regra}"
+    echo "  AVISO ${arquivo}:${linha}"
+    echo "    ${trecho}"
+    echo "    -> ${regra}"
+    echo
+    return 0
+  fi
   echo "::error file=${arquivo},line=${linha}::${regra}"
   echo "  ${arquivo}:${linha}"
   echo "    ${trecho}"
@@ -75,7 +132,13 @@ RE_DESPEJAR_ENV='(^|[[:space:]`(|;&])(printenv|env)([[:space:]]*$|[[:space:]]*\|
 # 3. Subir credencial como artefato. Artefato de repo publico e baixavel por
 #    qualquer conta do GitHub, e sobrevive 90 dias por padrao.
 # --------------------------------------------------------------------------
-RE_ARTEFATO='(path|name):[[:space:]]*["'"'"']?[^"'"'"']*(\.env|env\.txt|env-production|credenciais|secret|\.pem|id_rsa)'
+#
+#    So `path:`, e nunca `name:`. Com `name:` a regra acusava `- name: Cleanup
+#    .env` (titulo de passo) e ate `FROM_NAME: ${{ secrets.NL_FROM_NAME }}`
+#    (mapeamento de env), que sao inofensivos. E `secret` saiu da lista de
+#    nomes de arquivo porque casava com a palavra `secrets.` de qualquer
+#    expressao. Medido: 16 acusacoes, 9 delas falsas, antes deste corte.
+RE_ARTEFATO='^[[:space:]]*path:[[:space:]]*["'"'"']?[^"'"'"'$]*(\.env|env\.txt|env-production|credenciais|\.pem|id_rsa)'
 
 # --------------------------------------------------------------------------
 # 4. Segredo interpolado DENTRO de string de comando remoto. `ssh host "echo
@@ -163,6 +226,13 @@ trap 'rm -f "$RELATORIO"' EXIT
 } > "$RELATORIO"
 cat "$RELATORIO"
 FALHAS=$(grep -c "^::error" "$RELATORIO" 2>/dev/null || echo 0)
+AVISOS=$(grep -c "^::warning" "$RELATORIO" 2>/dev/null || echo 0)
+if [ "$AVISOS" -gt 0 ]; then
+  echo "----------------------------------------------------------------"
+  echo "PASSIVO: ${AVISOS} ocorrencia(s) que ja existiam antes deste diff."
+  echo "Nao reprovam agora, e nao sao aceitaveis: conserte cada uma quando"
+  echo "tocar no workflow dela. Nenhuma linha NOVA passa."
+fi
 
 # --------------------------------------------------------------------------
 # 8. Arquivo de credencial COMMITADO. Responde direto a "nenhum agente pode
