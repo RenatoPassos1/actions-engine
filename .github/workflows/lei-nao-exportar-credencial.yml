@@ -1,0 +1,64 @@
+name: "LEI: nenhuma credencial vira saida"
+
+# Este repositorio e PUBLICO de proposito: minuto de Actions em repo publico e
+# ilimitado, e essa e a razao de ele existir assim. A contrapartida e que log
+# de run e artefato daqui sao LEITURA ABERTA (o log dispensa ate estar logado),
+# e bot de varredura de segredo le os dois o dia inteiro.
+#
+# Em 25/06/2026 um workflow daqui publicou o .env.production inteiro da
+# producao do LeiloAI: 2.224 bytes com service role do banco, chave da Stripe,
+# chaves da Brevo, os quatro segredos internos e o salt de IP. Ficou 48 dias
+# baixavel. O repositorio JA TINHA secret scanning e push protection ligados, e
+# as duas passaram batido, porque elas procuram segredo ESCRITO NO COMMIT, e
+# ali nao havia segredo nenhum: havia um comando que ia BUSCAR o segredo em
+# tempo de execucao.
+#
+# Por isso esta trava e sobre o padrao do COMANDO, e nao sobre o valor. Ela e a
+# unica coisa que enxerga essa classe de defeito.
+#
+# Vale para qualquer autor, humano ou agente (Claude, Gemini, Antigravity,
+# Codex, Copilot). Agente commita com a identidade git de quem o roda, entao
+# autoria nao distingue nada e a trava nao tenta distinguir: ela le o diff.
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  varredura:
+    name: Nenhum caminho de credencial para a saida
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # `fetch-depth: 0` porque a trava precisa do diff para separar linha nova
+      # de passivo. Com o clone raso padrao ela nao acha a base e reprova tudo,
+      # que e o lado seguro do erro, mas nao e o comportamento util.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Definir a base do diff
+        id: base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          ANTES: ${{ github.event.before }}
+          PADRAO: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            echo "valor=origin/$BASE_REF" >> "$GITHUB_OUTPUT"
+          elif [ -n "$ANTES" ] && [ "$ANTES" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "$ANTES^{commit}" 2>/dev/null; then
+            echo "valor=$ANTES" >> "$GITHUB_OUTPUT"
+          else
+            echo "valor=origin/$PADRAO" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Varrer workflows e scripts
+        env:
+          DIFF_BASE: ${{ steps.base.outputs.valor }}
+        run: bash .github/scripts/proibir-exfiltracao.sh
