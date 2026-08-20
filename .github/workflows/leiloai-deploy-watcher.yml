@@ -31,23 +31,30 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      # SEM `token:`. Este checkout e do PROPRIO repositorio publico, e o
+      # GITHUB_TOKEN ja alcanca. Medido em 20/08/2026: o PAT que estava aqui
+      # tem admin em 15 repositorios do dono, entao usa-lo para ler um arquivo
+      # de estado deste repo era emprestar a chave-mestra para abrir a porta
+      # que ja estava destrancada.
+      #
+      # Ele PERSISTE de proposito: o passo final commita o state file de volta.
       - name: Checkout actions-engine (pra ler state file)
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
-          token: ${{ secrets.REPO_PAT }}
 
       - name: Pega SHA atual do feat/landing
         id: head
         env:
-          GH_TOKEN: ${{ secrets.REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
         run: |
           set -eu
-          SHA=$(curl -sS \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/RenatoPassos1/leilao-watch/branches/feat/landing" \
-            | python3 -c "import sys,json;print(json.load(sys.stdin).get('commit',{}).get('sha') or '')")
+          # `gh api` e nao `curl -H "Authorization: Bearer $GH_TOKEN"`: o shell
+          # expande a variavel ANTES de chamar o curl, entao o valor vai para o
+          # argv do processo e aparece no `ps` do runner. O `gh` le a credencial
+          # do ambiente e nunca a coloca na linha de comando. E some junto o
+          # python3 so para extrair um campo de JSON.
+          SHA=$(gh api repos/RenatoPassos1/leilao-watch/branches/feat/landing --jq '.commit.sha')
           if [ -z "$SHA" ]; then
             echo "::error::Nao consegui pegar SHA do branch feat/landing"
             exit 1
@@ -89,18 +96,19 @@ jobs:
       - name: Dispara deploy via repository_dispatch
         if: steps.cmp.outputs.action == 'deploy'
         env:
-          GH_TOKEN: ${{ secrets.REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
           HEAD_SHA: ${{ steps.head.outputs.sha }}
         run: |
           set -eu
-          curl -fsS -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/RenatoPassos1/actions-engine/dispatches" \
-            -d "{
-              \"event_type\":\"leiloai-deploy\",
-              \"client_payload\":{\"ref\":\"$HEAD_SHA\"}
-            }"
+          # Mesmo motivo do passo anterior: token nunca no argv.
+          #
+          # Aqui o PAT continua necessario e NAO da para trocar pelo
+          # GITHUB_TOKEN: evento criado por ele nao dispara workflow nenhum, e
+          # o deploy simplesmente nao aconteceria. Ver
+          # AUTHORIZED_BLOCKER_PAT_ESCOPO no ledger privado da migracao.
+          gh api -X POST repos/RenatoPassos1/actions-engine/dispatches \
+            -f event_type=leiloai-deploy \
+            -f "client_payload[ref]=$HEAD_SHA" >/dev/null
           echo "✓ Dispatched leiloai-deploy com ref=$HEAD_SHA"
 
       - name: Atualizar state file e commit

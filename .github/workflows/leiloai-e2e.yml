@@ -43,7 +43,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: RenatoPassos1/leilao-watch
-          token: ${{ secrets.REPO_PAT }}
+          token: ${{ secrets.LEILOAI_REPO_PAT }}
+          # O default do checkout e `true`: o token iria para o .git/config do
+          # workspace, e qualquer passo seguinte que rode codigo do repositorio
+          # (npm ci, postinstall, build) conseguiria le-lo. Medido em
+          # 20/08/2026: este token tem admin em 15 repositorios do dono.
+          persist-credentials: false
           ref: feat/landing
           fetch-depth: 1
 
