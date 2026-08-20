@@ -38,7 +38,7 @@ on:
         description: "identificador do lote (lista fechada)"
         required: true
         type: choice
-        options: [B001, B002, B003, B004, B005, B006]
+        options: [B001, B002, B003, B004, B005, B006, C007, C008, C009, C010, C011, C012]
       sha:
         description: "SHA de 40 hex do repo privado (vazio = HEAD do branch)"
         required: false
@@ -70,7 +70,7 @@ jobs:
           set -euo pipefail
           # Allowlist estrita. O valor vem de `choice`, mas conferir de novo
           # custa nada e fecha o caminho de dispatch por API.
-          printf '%s' "$BATCH" | grep -qE '^B00[1-6]$' || { echo "::error::lote invalido"; exit 1; }
+          printf '%s' "$BATCH" | grep -qE '^(B00[1-6]|C0(0[7-9]|1[0-2]))$' || { echo "::error::lote invalido"; exit 1; }
           SHA="${ENTRADA_SHA:-}"
           if [ -n "$SHA" ]; then
             printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
