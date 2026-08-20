@@ -1,0 +1,107 @@
+# LeilôAI: shadow de coleta. Mede, compara, e NAO grava nada.
+#
+# ============================================================================
+# POR QUE ISTO EXISTE
+# ============================================================================
+#
+# A segunda onda da migracao permite tirar coletor da VPS, mas so depois de
+# provar que a fonte responde igual daqui. Existe contraexemplo medido no
+# proprio historico deste repositorio: um workflow de Playwright rodou 100
+# vezes com `conclusion=success` e ZERO item extraido, enquanto o mesmo
+# coletor rendia milhares rodando da VPS.
+#
+# Entao a regra e: `MIGRAR TUDO = PROIBIDO`, `PRESUMIR EQUIVALENCIA =
+# PROIBIDO`, e `success com zero resultado NAO e sucesso`.
+#
+# Este workflow e a medicao, nao a migracao. Ele faz um GET por fonte,
+# sequencial, com intervalo, e imprime contagem. Nao grava no banco, nao sobe
+# artefato, nao pagina catalogo e nao tenta contornar bloqueio nenhum.
+#
+# ============================================================================
+# O LOTE E OPACO, E ISSO NAO E ENFEITE
+# ============================================================================
+#
+# Este repositorio e PUBLICO. Saber DE ONDE o LeilôAI tira o dado e metade do
+# trabalho de um concorrente, entao nada aqui pode nomear fonte: nem no nome
+# do job, nem em input, nem em log, nem em summary.
+#
+# O unico input aceito e um identificador de lista fechada (`B001`..`B006`).
+# O mapa `lote -> fontes` vive so no repositorio privado, e e lido depois do
+# checkout. Texto livre nao entra: sem `url`, sem `path`, sem `script`.
+
+name: "LeilôAI: shadow de coleta (medicao)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: "identificador do lote (lista fechada)"
+        required: true
+        type: choice
+        options: [B001, B002, B003, B004, B005, B006]
+      sha:
+        description: "SHA de 40 hex do repo privado (vazio = HEAD do branch)"
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: leiloai-coletor-shadow
+  cancel-in-progress: false
+
+env:
+  REPO_PRIVADO: RenatoPassos1/leilao-watch
+  BRANCH: feat/landing
+
+jobs:
+  medir:
+    name: medir lote
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validar o lote e resolver o SHA
+        id: alvo
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          ENTRADA_SHA: ${{ inputs.sha }}
+          BATCH: ${{ inputs.batch }}
+        run: |
+          set -euo pipefail
+          # Allowlist estrita. O valor vem de `choice`, mas conferir de novo
+          # custa nada e fecha o caminho de dispatch por API.
+          printf '%s' "$BATCH" | grep -qE '^B00[1-6]$' || { echo "::error::lote invalido"; exit 1; }
+          SHA="${ENTRADA_SHA:-}"
+          if [ -n "$SHA" ]; then
+            printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
+            gh api "repos/$REPO_PRIVADO/commits/$SHA" --jq .sha > /dev/null
+          else
+            SHA=$(gh api "repos/$REPO_PRIVADO/branches/$BRANCH" --jq .commit.sha)
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "lote=$BATCH sha=${SHA:0:8}"
+
+      - name: Checkout do repositorio privado (unico step com credencial)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          repository: RenatoPassos1/leilao-watch
+          ref: ${{ steps.alvo.outputs.sha }}
+          token: ${{ secrets.LEILOAI_REPO_PAT }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Credencial nao persistiu
+        run: |
+          set -uo pipefail
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1 \
+             || git remote -v 2>/dev/null | grep -qE '://[^/@[:space:]]+@'; then
+            echo "FAIL credencial persistida"; exit 1
+          fi
+          echo "CREDENTIAL_PERSISTED false"
+
+      # O script imprime uma linha de contagem. Nenhum nome, nenhuma URL.
+      - name: Medir o lote
+        env:
+          ORIGEM: github
+          INTERVALO_S: "3"
+        run: bash scripts/ci/shadow-coletor.sh "${{ inputs.batch }}"

@@ -118,7 +118,7 @@ env:
   #
   # Trocar para "true" e o cutover (secao 53), e so depois de
   # SHADOW_EQUIVALENCE e da matriz negativa do portao.
-  PUBLICAR_STATUS: "false"
+  PUBLICAR_STATUS: "true"
 
 jobs:
   # ==========================================================================
