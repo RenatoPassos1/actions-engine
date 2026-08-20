@@ -1,0 +1,355 @@
+# LeilôAI: o CI de validacao, rodando aqui em vez do runner da VPS.
+#
+# ============================================================================
+# POR QUE ISTO EXISTE
+# ============================================================================
+#
+# O CI do LeilôAI rodava num runner self-hosted DENTRO da VPS de producao. Ele
+# nao custava minuto, e custava a coisa mais escassa daquela maquina: CPU.
+# Medido em 20/08/2026, com um job em curso, o `Runner.Worker` e sua
+# `MainThread` somavam ~44% de um nucleo dos quatro, ao lado do Postgres, do
+# next-server e de 87 crons de coleta. Em dia de desenvolvimento ativo isso
+# eram 6 a 7 horas de disputa por dia.
+#
+# Aqui o minuto e ilimitado (repositorio publico) e a VPS deixa de ser o lugar
+# onde o codigo e compilado.
+#
+# ============================================================================
+# O CONTRA-ARGUMENTO QUE ESTAVA ESCRITO NO CI ANTIGO, E POR QUE ELE CAIU
+# ============================================================================
+#
+# O `ci.yml` do repositorio privado dizia, com razao, que trazer o build para
+# ca exigiria "guardar, nos segredos de um repo publico, um token com leitura
+# do repo privado", e que isso trocaria problema de cota por problema de
+# credencial.
+#
+# Medido antes de mexer: esse token JA EXISTE aqui e JA E USADO. O
+# `leiloai-ci-aprovado.yml` busca `scripts/avaliar-checks.mjs` do repositorio
+# privado com `LEILOAI_REPO_PAT`, e o `leiloai-dockerignore.yml` busca outro
+# script pelo mesmo caminho. A capacidade de ler o repositorio privado a partir
+# daqui nao e criada por esta migracao; ela e de antes.
+#
+# O que esta migracao acrescenta e a disciplina que faltava:
+#
+#   1. o token so aparece no step de checkout, com `persist-credentials: false`;
+#   2. um step confere, sem imprimir nada, que ele NAO ficou no `.git/config`;
+#   3. o job que executa codigo do repositorio privado nao recebe secret nenhum;
+#   4. quem publica o veredito e OUTRO job, em VM nova, que nao faz checkout e
+#      nao roda uma linha de codigo vinda do repositorio privado;
+#   5. toda action esta pinada por SHA de commit, e nao por tag movel.
+#
+# ============================================================================
+# LOG PUBLICO NAO PODE NOMEAR FONTE
+# ============================================================================
+#
+# O CI do LeilôAI imprime caminhos como `services/ingestion/<fonte>/...` e
+# `scripts/run-<fonte>.sh`. Isso nao e segredo, e e inteligencia operacional:
+# saber DE ONDE vem o dado e metade do trabalho de um concorrente, e log de
+# repositorio publico e leitura aberta para sempre.
+#
+# Por isso nenhum comando de build aparece aqui. Tudo passa por
+# `scripts/ci/run-public-safe-ci.sh`, do repositorio privado, que manda a saida
+# bruta para arquivo temporario e imprime uma linha por estagio.
+#
+# ============================================================================
+# COMO ELE E DISPARADO, E POR QUE NAO E `repository_dispatch`
+# ============================================================================
+#
+# `repository_dispatch` exigiria um token com escrita AQUI guardado no
+# repositorio privado, que hoje tem ZERO secrets registrados. Preservar essa
+# propriedade vale mais do que a latencia que ela custa.
+#
+# Entao o disparo e por sondagem do HEAD, igual ao `leiloai-ci-aprovado.yml`,
+# que ja funciona ha meses. Medido em 20/08/2026: o GitHub estrangula
+# `schedule` e entrega um cron `*/5` com mediana de 34,6 min e maximo de 55,3.
+# Para nao pagar DUAS vezes essa espera, o job de status dispara a aprovacao na
+# hora, em vez de deixar o outro workflow descobrir sozinho no proximo ciclo.
+#
+# Medido tambem: nos ultimos 100 runs do CI privado, 100 foram `push` em
+# `feat/landing` e nenhum foi `pull_request`, com zero PR aberto. Validar o
+# HEAD do branch cobre o trafego real. Se PR voltar a ser usado neste projeto,
+# a validacao de PR precisa voltar junto: sondagem de HEAD nao a substitui.
+
+name: "LeilôAI: CI publico (ARM)"
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "SHA de 40 hex do repo privado (vazio = HEAD do branch)"
+        required: false
+        type: string
+      mode:
+        description: "full = tudo; quick = so as checagens baratas"
+        required: false
+        default: full
+        type: choice
+        options: [full, quick]
+      forcar:
+        description: "rodar de novo mesmo se ja houver veredito para o SHA"
+        required: false
+        default: false
+        type: boolean
+  push:
+    paths:
+      - ".github/workflows/leiloai-ci-publico.yml"
+
+# Nenhum job precisa do GITHUB_TOKEN: quem fala com o repositorio privado usa
+# o PAT dedicado, e quem so computa nao fala com ninguem.
+permissions: {}
+
+concurrency:
+  group: leiloai-ci-publico
+  cancel-in-progress: false
+
+env:
+  # Hard-coded de proposito (secao 43.1): repositorio nunca vem de input.
+  REPO_PRIVADO: RenatoPassos1/leilao-watch
+  BRANCH: feat/landing
+  CONTEXTO: ci/actions-engine
+  # SHADOW -> CUTOVER com uma linha.
+  #
+  # Enquanto vale "false", este workflow roda inteiro, mede e imprime o
+  # veredito, e NAO escreve nada no repositorio privado. E o que torna a
+  # comparacao com o CI antigo observacional de verdade: falha do CI novo
+  # durante o shadow nao pode bloquear deploy nenhum.
+  #
+  # Trocar para "true" e o cutover (secao 53), e so depois de
+  # SHADOW_EQUIVALENCE e da matriz negativa do portao.
+  PUBLICAR_STATUS: "false"
+
+jobs:
+  # ==========================================================================
+  # JOB 0 — RESOLVER: decide QUAL SHA sera validado, e se ja foi.
+  # ==========================================================================
+  # Roda codigo fixo deste arquivo, com o PAT. Nao faz checkout, entao nao ha
+  # codigo de terceiro perto da credencial.
+  resolver:
+    name: resolver alvo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.alvo.outputs.sha }}
+      precisa: ${{ steps.alvo.outputs.precisa }}
+      mode: ${{ steps.alvo.outputs.mode }}
+    steps:
+      - name: Resolver SHA e decidir se precisa rodar
+        id: alvo
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          ENTRADA_SHA: ${{ inputs.sha }}
+          ENTRADA_MODE: ${{ inputs.mode }}
+          FORCAR: ${{ inputs.forcar }}
+        run: |
+          set -euo pipefail
+
+          # ---- modo: allowlist estrita, nunca texto livre
+          MODE="${ENTRADA_MODE:-full}"
+          case "$MODE" in
+            full|quick) ;;
+            *) echo "::error::modo invalido"; exit 1 ;;
+          esac
+
+          # ---- SHA: 40 hex, e nada mais
+          SHA="${ENTRADA_SHA:-}"
+          if [ -n "$SHA" ]; then
+            if ! printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
+              echo "::error::sha precisa ter 40 hex minusculos"
+              exit 1
+            fi
+            # Existe mesmo no repositorio privado? Input nao vira checkout sem
+            # passar por aqui.
+            gh api "repos/$REPO_PRIVADO/commits/$SHA" --jq .sha > /dev/null
+          else
+            SHA=$(gh api "repos/$REPO_PRIVADO/branches/$BRANCH" --jq .commit.sha)
+          fi
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha resolvido invalido"; exit 1; }
+
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+          # ---- ja ha veredito para este SHA?
+          # Sem isto, cada sondagem repetiria um build de 14 minutos sobre o
+          # mesmo commit. Falha tambem conta como veredito: recomecar sozinho
+          # sobre um commit quebrado seria laco infinito. Para reprocessar de
+          # proposito existe o input `forcar`.
+          if [ "$PUBLICAR_STATUS" != "true" ]; then
+            # Em shadow nao existe status para consultar, entao nao ha o que
+            # coalescer: cada execucao mede de novo, que e o ponto do shadow.
+            JA=0
+          else
+            JA=$(gh api "repos/$REPO_PRIVADO/commits/$SHA/status" \
+                   --jq "[.statuses[] | select(.context == \"$CONTEXTO\")] | length")
+          fi
+          if [ "${FORCAR:-false}" = "true" ]; then
+            echo "precisa=true" >> "$GITHUB_OUTPUT"
+            echo "forcado: revalidando ${SHA:0:8}"
+          elif [ "$JA" -gt 0 ]; then
+            echo "precisa=false" >> "$GITHUB_OUTPUT"
+            echo "${SHA:0:8} ja tem veredito publicado; nada a fazer."
+          else
+            echo "precisa=true" >> "$GITHUB_OUTPUT"
+            echo "vou validar ${SHA:0:8} (modo $MODE)"
+          fi
+
+  # ==========================================================================
+  # JOB A — COMPUTE: o unico lugar onde codigo do repositorio privado roda.
+  # ==========================================================================
+  # ARM porque a VPS e ARM (secao 42): validar em x86 o que roda em aarch64 e
+  # declarar equivalencia que ninguem mediu.
+  compute:
+    name: compute (ARM, sem segredo)
+    needs: resolver
+    if: needs.resolver.outputs.precisa == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      # O UNICO step que recebe credencial. Depois dele, nenhum outro tem
+      # `env:` com secret, entao o codigo privado que roda em seguida nao tem
+      # o que ler: o GitHub so injeta secret onde ele e referenciado.
+      - name: Checkout do repositorio privado (unico step com credencial)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          repository: RenatoPassos1/leilao-watch
+          ref: ${{ needs.resolver.outputs.sha }}
+          token: ${{ secrets.LEILOAI_REPO_PAT }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Conferencia sem imprimir conteudo: so PASS/FAIL. `.git/config` nunca
+      # e ecoado, porque e exatamente onde o token ficaria.
+      - name: Credencial nao persistiu
+        run: |
+          set -uo pipefail
+          falhas=0
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1; then
+            echo "FAIL extraheader presente"; falhas=$((falhas+1))
+          fi
+          if git config --local --get-regexp '^credential\.' >/dev/null 2>&1; then
+            echo "FAIL credential helper presente"; falhas=$((falhas+1))
+          fi
+          if git remote -v 2>/dev/null | grep -qE '://[^/@[:space:]]+@'; then
+            echo "FAIL remote com credencial embutida"; falhas=$((falhas+1))
+          fi
+          if grep -qiE '(x-access-token|ghp_|github_pat_|Authorization)' .git/config 2>/dev/null; then
+            echo "FAIL marca de token no config"; falhas=$((falhas+1))
+          fi
+          [ "$falhas" -eq 0 ] && echo "CREDENTIAL_PERSISTED false" || exit 1
+
+      # Secao 45: teste automatico que falha se variavel sensivel conhecida
+      # estiver presente no compute. Imprime NOME DE CATEGORIA, nunca valor.
+      - name: Nenhum segredo de producao neste job
+        run: |
+          set -uo pipefail
+          presentes=0
+          for nome in REPO_PAT LEILOAI_REPO_PAT ORACLE_SSH_KEY ORACLE_HOST ORACLE_USER \
+                      SUPABASE_SERVICE_ROLE_KEY LEILOAI_SUPABASE_SR LEILOAI_SUPABASE_DB_URL \
+                      DATABASE_URL STRIPE_SECRET_KEY BREVO_API_KEY CRON_SECRET \
+                      LEILOAI_DISPARO_SECRET GH_TOKEN GITHUB_TOKEN; do
+            if [ -n "${!nome:-}" ]; then
+              echo "FAIL categoria presente: $nome"
+              presentes=$((presentes+1))
+            fi
+          done
+          [ "$presentes" -eq 0 ] && echo "COMPUTE_SECRETS 0" || exit 1
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.1.0
+        with:
+          node-version: "22"
+          # SEM `cache:` de proposito. O cache do setup-node e chaveado pelo
+          # lockfile do repositorio PRIVADO e vive no repositorio PUBLICO, e a
+          # secao 41.2 proibe transportar workspace privado por cache ou
+          # artifact. `npm ci` do zero custa ~90 s; e o preco certo.
+
+      - name: Arquitetura e toolchain (comparavel com o self-hosted)
+        run: |
+          echo "ARCH $(uname -m)"
+          echo "NODE $(node --version)"
+          echo "NPM  $(npm --version)"
+
+      # Tudo o que executa codigo do repositorio privado passa por aqui, e a
+      # saida publica e uma linha por estagio.
+      - name: CI (saida sanitizada)
+        env:
+          SHA_ESPERADO: ${{ needs.resolver.outputs.sha }}
+        run: bash scripts/ci/run-public-safe-ci.sh "${{ needs.resolver.outputs.mode }}"
+
+  # ==========================================================================
+  # JOB B — STATUS: a autoridade. VM nova, sem checkout, sem codigo privado.
+  # ==========================================================================
+  # Secao 41.1: nao colocar o secret de status num step posterior ao codigo
+  # privado NA MESMA VM. Codigo executado mexe em PATH, GITHUB_ENV, arquivos e
+  # binarios locais; VM separada elimina o caminho inteiro.
+  status:
+    name: publicar veredito no SHA exato
+    needs: [resolver, compute]
+    if: always() && needs.resolver.outputs.precisa == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # `actions: write` e so para acordar o workflow de aprovacao NESTE
+    # repositorio. Ele nao alcanca o repositorio privado, que e falado pelo PAT.
+    permissions:
+      actions: write
+    steps:
+      - name: Publicar commit status e acordar a aprovacao
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          TOKEN_DISPARO: ${{ github.token }}
+          SHA: ${{ needs.resolver.outputs.sha }}
+          RESULTADO: ${{ needs.compute.result }}
+        run: |
+          set -euo pipefail
+
+          # `success` do compute e a UNICA coisa que vira success aqui.
+          # failure, cancelled, skipped e timed_out reprovam, porque nenhum
+          # deles significa "o codigo foi validado".
+          if [ "$RESULTADO" = "success" ]; then
+            ESTADO=success
+            DESCR="CI publico ARM verde"
+          else
+            ESTADO=failure
+            DESCR="compute terminou como $RESULTADO"
+          fi
+
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
+
+          if [ "$PUBLICAR_STATUS" != "true" ]; then
+            echo "SHADOW veredito=$ESTADO sha=${SHA:0:8} (nada foi escrito no repo privado)"
+            {
+              echo "modo=shadow"
+              echo "private_sha=$SHA"
+              echo "veredito=$ESTADO"
+              echo "actions_engine_run_id=${{ github.run_id }}"
+              echo "runner_arch=arm64"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          gh api -X POST "repos/$REPO_PRIVADO/statuses/$SHA" \
+            -f state="$ESTADO" \
+            -f context="$CONTEXTO" \
+            -f description="$DESCR" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --jq '"publicado: \(.context) = \(.state)"'
+
+          # Acordar a aprovacao imediatamente. Sem isto, o veredito ficaria
+          # esperando o proximo ciclo do `schedule`, que o GitHub entrega com
+          # mediana de 34,6 min: seria pagar a mesma espera duas vezes.
+          if [ "$ESTADO" = "success" ]; then
+            GH_TOKEN="$TOKEN_DISPARO" gh workflow run leiloai-ci-aprovado.yml \
+              --repo "${{ github.repository }}" >/dev/null 2>&1 \
+              && echo "aprovacao disparada" \
+              || echo "::notice::nao consegui disparar a aprovacao; ela roda no proximo ciclo"
+          fi
+
+          # Provenance (secao 49.4), sem source intel.
+          {
+            echo "private_sha=$SHA"
+            echo "actions_engine_run_id=${{ github.run_id }}"
+            echo "runner_arch=arm64"
+            echo "conclusion=$ESTADO"
+          } >> "$GITHUB_STEP_SUMMARY"

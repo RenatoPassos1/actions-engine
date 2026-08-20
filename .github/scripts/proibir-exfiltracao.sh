@@ -40,7 +40,7 @@ while IFS= read -r f; do
 done < <(
   find . -type f \
     \( -path "./.github/workflows/*" -o -name "*.sh" -o -name "*.bash" \) \
-    -not -path "./.git/*" 2>/dev/null | sort
+    -not -path "./.git/*" -not -path "*/node_modules/*" 2>/dev/null | sort
 )
 
 # --------------------------------------------------------------------------
@@ -181,6 +181,25 @@ RE_RASTRO='^[[:space:]]*set[[:space:]]+-[a-z]*x'
 # --------------------------------------------------------------------------
 RE_REMOTE_COM_TOKEN='https://[^[:space:]@/]*(token|pat|ghp_|github_pat|\$\{)[^[:space:]@]*@github\.com'
 
+# --------------------------------------------------------------------------
+# 9. `pull_request_target`. Ele roda com os secrets do repositorio e com
+#    permissao de escrita; junto de um checkout do HEAD do PR, e o caminho
+#    classico de escalada em repositorio publico.
+#
+#    Medido em 20/08/2026: este repositorio tem ZERO ocorrencias, e essa e uma
+#    propriedade a preservar, nao um acaso a redescobrir.
+# --------------------------------------------------------------------------
+RE_PR_TARGET='^[[:space:]]*pull_request_target[[:space:]]*:'
+
+# --------------------------------------------------------------------------
+# 10. Input publico que escolhe O QUE roda. `workflow_dispatch` e
+#     `repository_dispatch` sao acionaveis por quem tem escrita aqui, e um
+#     input `repository`, `path`, `command`, `script` ou `url` transforma o
+#     workflow num executor generico. O contrato seguro e SHA de 40 hex mais
+#     um modo de lista fechada.
+# --------------------------------------------------------------------------
+RE_INPUT_ARBITRARIO='^[[:space:]]+(repository|repo|path|command|cmd|script|url|target_repo)[[:space:]]*:[[:space:]]*$'
+
 # Uma passada de `grep` por REGRA, e nao por linha. A versao por linha gastava
 # oito processos a cada linha lida, e num workflow de 400 linhas isso passava de
 # dois minutos so aqui. Trava lenta atrasa todo mundo e vira candidata a ser
@@ -223,10 +242,12 @@ trap 'rm -f "$RELATORIO"' EXIT
   varrer ignorar-caixa "$RE_TRANSFORMAR_SEGREDO" "transforma segredo (base64/rev/cut): a saida transformada NAO e mascarada"
   varrer respeitar-caixa "$RE_RASTRO" "set -x imprime cada comando ja expandido, inclusive os que carregam segredo"
   varrer ignorar-caixa "$RE_REMOTE_COM_TOKEN" "remote com credencial na URL: qualquer git remote -v imprime inteiro"
+  varrer respeitar-caixa "$RE_PR_TARGET" "pull_request_target: roda com secrets do repositorio e, junto de checkout do HEAD do PR, e o caminho classico de escalada. Este repositorio tem ZERO ocorrencias e a meta e continuar assim"
+  varrer respeitar-caixa "$RE_INPUT_ARBITRARIO" "input publico de texto livre (repository/path/command/script/url): quem dispara passa a escolher o que roda. Aceite so SHA de 40 hex e modo allowlisted"
 } > "$RELATORIO"
 cat "$RELATORIO"
-FALHAS=$(grep -c "^::error" "$RELATORIO" 2>/dev/null || echo 0)
-AVISOS=$(grep -c "^::warning" "$RELATORIO" 2>/dev/null || echo 0)
+FALHAS=$(grep -c "^::error" "$RELATORIO" 2>/dev/null); FALHAS=${FALHAS:-0}
+AVISOS=$(grep -c "^::warning" "$RELATORIO" 2>/dev/null); AVISOS=${AVISOS:-0}
 if [ "$AVISOS" -gt 0 ]; then
   echo "----------------------------------------------------------------"
   echo "PASSIVO: ${AVISOS} ocorrencia(s) que ja existiam antes deste diff."
@@ -235,7 +256,14 @@ if [ "$AVISOS" -gt 0 ]; then
 fi
 
 # --------------------------------------------------------------------------
-# 8. Arquivo de credencial COMMITADO. Responde direto a "nenhum agente pode
+# 8. Arquivo de credencial COMMITADO.
+#
+#    `node_modules` fica de fora do `find`, e nao por conveniencia: o pacote
+#    `ssh2` traz `test/fixtures/id_rsa` e dois `.pem` de teste, e uma arvore
+#    local com dependencias instaladas fazia esta trava reprovar com tres
+#    erros que nao existem no repositorio (medido em 20/08/2026, `git ls-files`
+#    devolve zero para esses caminhos). Trava que reprova na maquina de quem
+#    trabalha, por lixo de vendor, e trava que a pessoa aprende a ignorar. Responde direto a "nenhum agente pode
 #    deployar um doc com credenciais": aqui nao entra, nem por engano.
 # --------------------------------------------------------------------------
 while IFS= read -r f; do
@@ -249,12 +277,111 @@ while IFS= read -r f; do
   echo
   FALHAS=$((FALHAS + 1))
 done < <(
-  find . -type f \
-    \( -name ".env" -o -name ".env.*" -o -iname "*credenciais*" -o -iname "*credentials*" \
-       -o -name "*.pem" -o -name "id_rsa" -o -name "id_ed25519" -o -name "*.p12" \
-       -o -name "*.pfx" -o -iname "serviceaccount*.json" \) \
-    -not -path "./.git/*" 2>/dev/null | sort
+  # QUEM RESPONDE E O GIT, e nao o `find`, porque a regra e sobre arquivo
+  # COMMITADO. Medido em 20/08/2026: numa arvore de trabalho com dependencias
+  # instaladas, o `find` acusava tres arquivos do pacote `ssh2`
+  # (`test/fixtures/id_rsa` e dois `.pem`), que o `git ls-files` nao lista
+  # porque eles nunca entraram no repositorio. Trava que reprova por lixo de
+  # vendor na maquina de quem trabalha e trava que a pessoa aprende a ignorar.
+  #
+  # O `find` fica como reserva para execucao fora de repositorio git, e ali
+  # ele exclui `node_modules` pelo mesmo motivo.
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    git ls-files -- \
+      '.env' '.env.*' '*credenciais*' '*credentials*' '*.pem' 'id_rsa' \
+      'id_ed25519' '*.p12' '*.pfx' 'serviceaccount*.json' 2>/dev/null | sort
+  else
+    find . -type f \
+      \( -name ".env" -o -name ".env.*" -o -iname "*credenciais*" -o -iname "*credentials*" \
+         -o -name "*.pem" -o -name "id_rsa" -o -name "id_ed25519" -o -name "*.p12" \
+         -o -name "*.pfx" -o -iname "serviceaccount*.json" \) \
+      -not -path "./.git/*" -not -path "*/node_modules/*" 2>/dev/null | sort
+  fi
 )
+
+# --------------------------------------------------------------------------
+# 11 a 14. CONFERENCIAS ESTRUTURAIS: nao cabem numa regex de uma linha.
+#
+# As quatro nascem da migracao do CI do LeiloAI para ca (20/08/2026). O que
+# elas protegem: este repositorio e PUBLICO e passou a fazer checkout de um
+# repositorio PRIVADO para compilar. Isso e seguro exatamente enquanto quatro
+# propriedades valerem, e nenhuma delas e visivel numa linha isolada.
+# --------------------------------------------------------------------------
+estrutural() {
+  local f linhas l
+  for f in "${ALVOS[@]}"; do
+    case "$f" in *.yml|*.yaml) ;; *) continue ;; esac
+
+    # 11. Checkout de OUTRO repositorio (o privado) sem `persist-credentials:
+    #     false`. O default do actions/checkout e `true`: o token vai para o
+    #     `.git/config` do workspace, e qualquer passo seguinte que rode
+    #     codigo do repositorio (npm ci, postinstall, next build) consegue
+    #     le-lo. Com o PAT amplo do lado, isso abre 13 projetos.
+    linhas=$(awk '
+      /^[[:space:]]*-[[:space:]]+uses:[[:space:]]*actions\/checkout/ {
+        inicio=NR; indent=match($0,/[^ ]/); dentro=1; temrepo=0; tempersist=0; next
+      }
+      dentro==1 {
+        if ($0 ~ /^[[:space:]]*$/) next
+        ind=match($0,/[^ ]/)
+        if (ind <= indent) {
+          if (temrepo && !tempersist) print inicio
+          dentro=0
+        } else {
+          if ($0 ~ /repository:/) temrepo=1
+          if ($0 ~ /persist-credentials:[[:space:]]*false/) tempersist=1
+        }
+      }
+      END { if (dentro==1 && temrepo && !tempersist) print inicio }
+    ' "$f")
+    for l in $linhas; do
+      acusar "$f" "$l" "checkout de outro repositorio sem persist-credentials: false. O token fica no .git/config e qualquer passo seguinte que execute codigo do repo o le" "$(sed -n "${l}p" "$f" | cut -c1-120)"
+    done
+
+    # 12. Workflow que faz checkout de repositorio privado E sobe artefato ou
+    #     guarda cache. Artefato de repo publico e baixavel por qualquer conta
+    #     do GitHub por 90 dias; cache chaveado por lockfile privado vive
+    #     aqui, num repositorio publico. Codigo privado nao atravessa nenhum
+    #     dos dois.
+    if grep -qE 'repository:[[:space:]]*RenatoPassos1/' "$f"; then
+      linhas=$(grep -nE 'uses:[[:space:]]*actions/(upload-artifact|cache)' "$f" | cut -d: -f1)
+      for l in $linhas; do
+        acusar "$f" "$l" "artefato ou cache num workflow que faz checkout de repositorio privado: codigo privado nao pode atravessar armazenamento de repositorio publico" "$(sed -n "${l}p" "$f" | cut -c1-120)"
+      done
+    fi
+
+    # 13. Workflow do LeiloAI usando o PAT multiprojeto. Medido em 20/08/2026:
+    #     `REPO_PAT` alcanca 13 repositorios privados, e existe
+    #     `LEILOAI_REPO_PAT` dedicado. Uma falha no caminho do LeiloAI nao
+    #     pode entregar os outros doze.
+    case "$(basename "$f")" in
+      leiloai-*)
+        linhas=$(grep -nE 'secrets\.REPO_PAT\b' "$f" | cut -d: -f1)
+        for l in $linhas; do
+          acusar "$f" "$l" "workflow do LeiloAI usando o REPO_PAT multiprojeto (13 repositorios). Use LEILOAI_REPO_PAT, que e dedicado" "$(sed -n "${l}p" "$f" | cut -c1-120)"
+        done
+
+        # 14. Action presa a TAG num workflow do LeiloAI. Tag e movel: quem
+        #     controla o repositorio da action a reaponta quando quiser, e o
+        #     step herda o novo codigo sem nenhum diff aqui.
+        linhas=$(grep -nE 'uses:[[:space:]]*[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+@(v[0-9][^[:space:]]*|main|master)[[:space:]]*$' "$f" | cut -d: -f1)
+        for l in $linhas; do
+          acusar "$f" "$l" "action presa a tag movel: pine por SHA de commit. Tag pode ser reapontada por quem controla a action" "$(sed -n "${l}p" "$f" | cut -c1-120)"
+        done
+        ;;
+    esac
+  done
+}
+
+RELATORIO2="$(mktemp)"
+trap 'rm -f "$RELATORIO" "$RELATORIO2"' EXIT
+estrutural > "$RELATORIO2"
+cat "$RELATORIO2"
+ERROS2=$(grep -c "^::error" "$RELATORIO2" 2>/dev/null); FALHAS=$((FALHAS + ${ERROS2:-0}))
+AVISOS2=$(grep -c "^::warning" "$RELATORIO2" 2>/dev/null); AVISOS2=${AVISOS2:-0}
+if [ "$AVISOS2" -gt 0 ]; then
+  echo "PASSIVO ESTRUTURAL: ${AVISOS2} ocorrencia(s) anteriores a este diff."
+fi
 
 echo "----------------------------------------------------------------"
 if [ "$FALHAS" -gt 0 ]; then
