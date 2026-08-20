@@ -217,7 +217,17 @@ jobs:
           ref: ${{ needs.resolver.outputs.sha }}
           token: ${{ secrets.LEILOAI_REPO_PAT }}
           persist-credentials: false
-          fetch-depth: 0
+          # 2, e o numero tem motivo dos dois lados.
+          #
+          # Com 0, o git imprime `* [new branch] <nome>` para CADA branch do
+          # repositorio privado. Medido em 20/08/2026 no primeiro shadow: 17
+          # dessas linhas carregavam identificador de fonte de coleta para o
+          # log de um repositorio PUBLICO.
+          #
+          # Com 1 nao existe HEAD~1, e o secret scan do CI compara o delta do
+          # commit contra o pai. Sem pai ele varreria vazio e diria "passou",
+          # que e falso verde de trava de credencial.
+          fetch-depth: 2
 
       # Conferencia sem imprimir conteudo: so PASS/FAIL. `.git/config` nunca
       # e ecoado, porque e exatamente onde o token ficaria.
