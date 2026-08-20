@@ -1,0 +1,162 @@
+# LeilôAI. Publica, como ref no repositorio privado, quais commits tem CI verde.
+#
+# ============================================================================
+# POR QUE ISTO EXISTE
+# ============================================================================
+#
+# Medido em 20/08/2026: o `leilao-watch` esta no plano Free, e tanto
+# `branches/*/protection` quanto `rulesets` respondem 403
+# "Upgrade to GitHub Pro". Nao existe *required status check*, entao CI
+# vermelho DETECTA a regressao e nao IMPEDE nada: um commit reprovado pode ser
+# mergeado e chegar em producao.
+#
+# A plataforma nao deixa bloquear o merge. Deixa bloquear o DEPLOY. Para isso o
+# `scripts/deploy.sh` da VPS precisa conseguir perguntar "o CI DESTE SHA esta
+# verde?" antes de construir qualquer coisa.
+#
+# ============================================================================
+# POR QUE UM REF, E NAO A VPS CONSULTANDO A API
+# ============================================================================
+#
+# Medido na propria VPS: ela **nao tem `gh`**, fala com o GitHub por **chave
+# SSH de deploy** (`git@github-leiloai:...`) e **nao guarda token nenhum**.
+# Criar um PAT e acao de interface, ou seja, dependeria do dono.
+#
+# Entao quem consulta a API e este workflow, onde o token ja existe, e o
+# veredito vira um ref no proprio repositorio:
+#
+#     refs/ci-aprovado/<sha>  ->  <sha>
+#
+# A VPS le por `git ls-remote`, com a chave que ja usa para o `git pull`. Sem
+# credencial nova em lugar nenhum.
+#
+# O ref aponta para o PROPRIO commit aprovado. Isso nao e detalhe: o portao
+# exige que o objeto apontado seja exatamente o SHA perguntado, entao um ref
+# nao consegue aprovar um commit diferente daquele que ele nomeia.
+#
+# NUNCA APAGA REF. Aprovacao nao se retira, porque um commit que passou no CI
+# passou no CI. Se algo estiver errado com ele, o caminho e um commit novo.
+#
+# ============================================================================
+# O TOKEN NAO ALCANCA CODIGO VINDO DO REPO PRIVADO
+# ============================================================================
+#
+# A coleta (as chamadas `gh api`) esta AQUI, em codigo fixo deste arquivo, com
+# `GH_TOKEN` no ambiente. Quem decide o veredito e
+# `scripts/avaliar-checks.mjs`, buscado do repositorio privado e executado num
+# passo **sem `env:` nenhum**. O GitHub so injeta secret onde ele e
+# referenciado, entao o codigo baixado nao tem o que ler.
+#
+# Isso DUPLICA seis linhas de coleta que tambem existem em
+# `scripts/conferir-ci-do-commit.sh` (na funcao `tentar_api`), e a duplicacao e
+# deliberada: unificar exigiria executar o script do repo privado com o token
+# no ambiente, que e exatamente a propriedade que este arquivo preserva. Se for
+# mexer numa, olhe a outra.
+#
+# E `gh api`, nunca `curl -H "Authorization: Bearer ..."`: o `gh` le o token do
+# ambiente e ele nao entra no argv, onde apareceria no `ps` do runner. Este
+# repositorio e PUBLICO, e nada aqui imprime valor de credencial.
+
+name: "LeilôAI: CI verde vira ref de aprovacao"
+
+on:
+  schedule:
+    # De 5 em 5 minutos. E a latencia entre o CI ficar verde e o deploy poder
+    # acontecer, entao vale ser curta: o build em si ja leva 9 minutos.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/leiloai-ci-aprovado.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leiloai-ci-aprovado
+  cancel-in-progress: false
+
+jobs:
+  aprovar:
+    name: aprovar commits com CI verde (${{ matrix.branch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # `feat/landing` e o que a VPS tem em pe. `main` nao chega em producao.
+        branch: ["feat/landing"]
+
+    steps:
+      - name: Coletar o estado do CI do HEAD (codigo fixo, com token)
+        id: coletar
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          BRANCH: ${{ matrix.branch }}
+        run: |
+          set -euo pipefail
+          REPO=RenatoPassos1/leilao-watch
+          mkdir -p ci
+
+          SHA=$(gh api "repos/$REPO/branches/$BRANCH" --jq .commit.sha)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "$BRANCH -> $SHA"
+
+          # `/actions/runs` e nao `/commits/{sha}/check-runs`: a rota de checks
+          # responde 403 com este PAT, que nao tem a permissao `Checks`.
+          EXEC=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" \
+                   --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')
+
+          GRUPOS=""
+          while read -r id head; do
+            [ -n "${id:-}" ] || continue
+            # head_sha injetado e o da EXECUCAO, para o avaliador conferir a
+            # resposta da API contra a pergunta em vez de confirmar a si mesma.
+            JOBS=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
+                     --jq "[.jobs[] | {id, name, status, conclusion, head_sha: \"$head\"}]")
+            [ -n "$JOBS" ] || continue
+            if [ -z "$GRUPOS" ]; then GRUPOS="$JOBS"; else GRUPOS="$GRUPOS,$JOBS"; fi
+          done <<< "$EXEC"
+
+          STATUSES=$(gh api "repos/$REPO/commits/$SHA/status" --jq '.statuses' || echo '[]')
+          [ -n "$STATUSES" ] || STATUSES='[]'
+
+          printf '{"sha":"%s","grupos":[%s],"statuses":%s}' "$SHA" "$GRUPOS" "$STATUSES" > ci/estado.json
+          echo "estado coletado: $(wc -c < ci/estado.json) bytes"
+
+          # O avaliador vem do repositorio privado, no MESMO SHA que esta sendo
+          # julgado: a regra e do commit, e nao do branch.
+          gh api "repos/$REPO/contents/scripts/avaliar-checks.mjs?ref=$SHA" \
+            -H "Accept: application/vnd.github.raw" > ci/avaliar-checks.mjs
+          echo "avaliador: $(wc -c < ci/avaliar-checks.mjs) bytes"
+
+      # SEM `env:` DE PROPOSITO: e aqui que roda codigo vindo do outro repo.
+      - name: Decidir (codigo do repo privado, sem token no ambiente)
+        id: decidir
+        continue-on-error: true
+        run: node ci/avaliar-checks.mjs < ci/estado.json
+
+      - name: Criar o ref de aprovacao
+        if: steps.decidir.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          SHA: ${{ steps.coletar.outputs.sha }}
+        run: |
+          set -euo pipefail
+          REPO=RenatoPassos1/leilao-watch
+          REF="refs/ci-aprovado/$SHA"
+
+          if gh api "repos/$REPO/git/$REF" --jq .object.sha >/dev/null 2>&1; then
+            echo "ja aprovado antes: $REF"
+            exit 0
+          fi
+          gh api -X POST "repos/$REPO/git/refs" \
+            -f ref="$REF" -f sha="$SHA" --jq .ref
+          echo "aprovado: $REF -> $SHA"
+
+      - name: Dizer alto quando NAO aprovou
+        if: steps.decidir.outcome != 'success'
+        env:
+          SHA: ${{ steps.coletar.outputs.sha }}
+        run: |
+          echo "::notice::CI do commit ${SHA:0:8} ainda nao esta verde: nenhum ref de aprovacao foi criado, e o deploy deste commit fica bloqueado. Isto e o comportamento correto, nao um defeito deste workflow."
