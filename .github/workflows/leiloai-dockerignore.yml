@@ -1,0 +1,137 @@
+# LeilôAI. O .dockerignore do leilao-watch impede mesmo um .env de entrar?
+#
+# POR QUE ESTA CHECAGEM MORA AQUI, E NAO NO CI DO PROPRIO REPO
+# Ela precisa de `docker build`. Enquanto o CI do leilao-watch precisasse de
+# docker, o runner self-hosted dele tinha que rodar num usuario do grupo
+# `docker`, e quem esta nesse grupo le QUALQUER arquivo da maquina montando
+# volume (`docker run -v /home/ubuntu:/x`). Ou seja, o runner era obrigado a
+# poder ler o `.env.production` da producao. Medido em 20/08/2026: era o unico
+# job que precisava de docker. Ele veio para ca, e o runner de la virou um
+# usuario sem `sudo` e sem `docker`.
+#
+# Aqui e publico, entao minuto de Actions e ilimitado e nao consome a cota do
+# repositorio privado (~1.157 execucoes/mes medidas em 7 dias).
+#
+# ISTO NAO E O PORTAO QUE BLOQUEIA PUBLICACAO, E NAO SE DEVE VENDER COMO TAL.
+# Quem bloqueia sao os portoes 2/7 e 3/7 do `scripts/build-imagem-web.sh`, que
+# procuram .env e segredo DENTRO da imagem construida, mais a trava do proprio
+# Dockerfile. O valor proprio desta checagem e ser MAIS CEDO e MAIS ESPECIFICA:
+# ela responde em segundos, diz que o problema e a ANCORAGEM do padrao, e pega
+# o defeito inverso (um .dockerignore largo demais quebra o `npm ci` no deploy)
+# que os outros dois nao pegam.
+#
+# NENHUM SEGREDO ALCANCA O CODIGO BUSCADO
+# O passo que executa o script vindo do repo privado roda com env LIMPA: o
+# `LEILOAI_REPO_PAT` so aparece nos passos de buscar e de publicar status, que
+# sao codigo fixo deste arquivo. O GitHub so injeta secret onde ele e
+# referenciado, entao o script baixado nao tem o que ler. Isto e defesa em
+# profundidade: escrever no leilao-watch ja exige acesso de escrita nele.
+#
+# E o repositorio e PUBLICO: log daqui e leitura aberta. Nada neste workflow
+# imprime valor de credencial. Os .env plantados pelo checador levam
+# `valor-falso-de-teste`, e sao criados dentro de um diretorio temporario.
+
+name: "LeilôAI: .dockerignore de verdade"
+
+on:
+  schedule:
+    # 2 em 2 horas. Nao precisa ser mais rapido: o portao que impede a imagem
+    # sair com segredo e o do build, na VPS. Este aqui e aviso antecipado.
+    - cron: "41 */2 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/leiloai-dockerignore.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leiloai-dockerignore
+  cancel-in-progress: false
+
+jobs:
+  conferir:
+    name: contexto de build (${{ matrix.branch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # SO `feat/landing`, e isso e deliberado. E o branch que a VPS tem em
+        # pe (conferido em 20/08/2026: a arvore de /home/ubuntu/apps/leiloai
+        # esta em feat/landing), e `main` esta centenas de commits atras e nao
+        # chega em producao. Um job que nao existe naquele ref ficaria vermelho
+        # para sempre, e trava que sempre reprova ensina a ignorar vermelho.
+        branch: ["feat/landing"]
+
+    steps:
+      - name: Buscar o .dockerignore e o checador no repo privado
+        id: buscar
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          BRANCH: ${{ matrix.branch }}
+        run: |
+          set -euo pipefail
+          REPO=RenatoPassos1/leilao-watch
+          mkdir -p ctx
+
+          # `gh api` e nao `curl`: o gh le o token da env, entao ele nunca
+          # entra no argv e nao aparece no `ps` do runner. Com
+          # `-H "Authorization: Bearer $TOKEN"` entraria.
+          #
+          # `branches/<nome>` aguenta a barra de feat/landing; `commits/<nome>`
+          # nao, e e por isso que nao se usa o segundo aqui.
+          SHA=$(gh api "repos/$REPO/branches/$BRANCH" --jq .commit.sha)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "branch $BRANCH -> $SHA"
+
+          for par in ".dockerignore:ctx/.dockerignore"                      "scripts/conferir-contexto-docker.sh:ctx/conferir.sh"; do
+            origem=${par%%:*}; destino=${par##*:}
+            # Sem tolerancia a arquivo ausente DE PROPOSITO: se alguem apagar o
+            # checador do repo privado, isto tem que ficar vermelho, e nao
+            # passar em silencio por nao ter o que conferir.
+            gh api "repos/$REPO/contents/$origem?ref=$SHA"               -H "Accept: application/vnd.github.raw" > "$destino"
+            echo "  baixado $origem ($(wc -c < "$destino") bytes)"
+          done
+
+      # Trava que nunca foi vista reprovando nao vale nada. Em 19/08/2026 o
+      # portao que procura segredo dentro da imagem PASSOU numa imagem que
+      # tinha service_role, porque rodava `node` num busybox, recebia
+      # "sh: node: not found" e concluia [ok]. Por isso o checador prova os
+      # tres sentidos ANTES de o veredito real valer alguma coisa.
+      #
+      # SEM `env:` DE PROPOSITO: e aqui que roda codigo vindo do outro repo.
+      - name: Auto-teste do checador (os tres sentidos)
+        run: bash ctx/conferir.sh --autoteste
+
+      # Tambem sem `env:`.
+      - name: A checagem real
+        id: real
+        run: DOCKERIGNORE=ctx/.dockerignore bash ctx/conferir.sh
+
+      # O repo privado esta no plano Free, entao nao tem branch protection nem
+      # ruleset (a API responde 403 "Upgrade to GitHub Pro"). O status abaixo
+      # NAO bloqueia merge nenhum, e nao existe hoje nada que bloqueie. Ele
+      # serve para o vermelho aparecer no commit certo, no repo certo, em vez
+      # de ficar so aqui.
+      - name: Publicar o resultado no commit do leilao-watch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          SHA: ${{ steps.buscar.outputs.sha }}
+          RESULTADO: ${{ steps.real.outcome }}
+          CORRIDA: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SHA:-}" ]; then
+            echo "sem SHA (a busca falhou antes): nada a publicar"
+            exit 0
+          fi
+          case "$RESULTADO" in
+            success) ESTADO=success; TEXTO="nenhum .env entra no contexto de build" ;;
+            skipped) ESTADO=error;   TEXTO="a checagem nem chegou a rodar" ;;
+            *)       ESTADO=failure; TEXTO="o .dockerignore nao segura os .env" ;;
+          esac
+          gh api -X POST "repos/RenatoPassos1/leilao-watch/statuses/$SHA"             -f state="$ESTADO"             -f context="dockerignore-real (actions-engine)"             -f description="$TEXTO"             -f target_url="$CORRIDA" > /dev/null
+          echo "status '$ESTADO' publicado em ${SHA:0:8}"
