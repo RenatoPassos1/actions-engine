@@ -1,0 +1,34 @@
+# TEMPORARIO. Mede o alcance do LEILOAI_REPO_PAT sem imprimir o valor dele.
+#
+# POR QUE: a API do GitHub nao expoe o escopo de um PAT, e a secao 40.2 do
+# plano de migracao proibe INFERIR permissao pelo nome do secret. Sem medir,
+# trocar `REPO_PAT` por `LEILOAI_REPO_PAT` no `leiloai-deploy-watcher` seria
+# apostar: aquele workflow tambem ESCREVE neste repositorio (repository_dispatch)
+# e nao so le o privado.
+#
+# Nada aqui altera estado. So HTTP status.
+name: "LeilôAI: sonda de escopo do PAT (temporario)"
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sondar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Alcance do PAT dedicado
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+        run: |
+          set -uo pipefail
+          codigo() { gh api "$1" --silent >/dev/null 2>&1 && echo 200 || echo "nao"; }
+          echo "leilao-watch (privado, leitura) ....... $(codigo repos/RenatoPassos1/leilao-watch)"
+          echo "actions-engine (publico, leitura) ..... $(codigo repos/RenatoPassos1/actions-engine)"
+          echo "UtilizAi (privado de outro projeto) ... $(codigo repos/RenatoPassos1/UtilizAi)"
+          echo "richesse-club (privado de outro) ...... $(codigo repos/RenatoPassos1/richesse-club)"
+          echo "--- permissoes efetivas onde responde ---"
+          gh api repos/RenatoPassos1/leilao-watch --jq '"leilao-watch: \(.permissions)"' 2>/dev/null || echo "leilao-watch: sem resposta"
+          gh api repos/RenatoPassos1/actions-engine --jq '"actions-engine: \(.permissions)"' 2>/dev/null || echo "actions-engine: sem resposta"
