@@ -1,0 +1,127 @@
+# LeilôAI: canário da credencial de veredito.
+#
+# ============================================================================
+# POR QUE EXISTE
+# ============================================================================
+#
+# `LEILOAI_STATUS_PAT` substituiu, em 21/08/2026, um PAT que alcançava 15
+# repositórios do dono com admin. Provar que o novo FUNCIONA é fácil: os quatro
+# workflows rodaram verdes. Provar que ele NÃO PODE fazer o resto é o que
+# importa, e é o que este arquivo faz.
+#
+# A diferença não é acadêmica. Uma credencial trocada por outra igualmente
+# ampla passa exatamente nos mesmos testes de sucesso, e o relatório diria
+# "migrado" com o risco inteiro de pé.
+#
+# ============================================================================
+# O QUE ELE NUNCA FAZ
+# ============================================================================
+#
+# Não imprime o valor, não o transforma, não o grava em arquivo e não o manda
+# para lugar nenhum. O que sai daqui são códigos HTTP e o veredito.
+#
+# `gh api` lê o token da env, então ele nunca entra em argv nem aparece no `ps`.
+# Um `curl -H "Authorization: Bearer $T"` colocaria o valor na linha de comando.
+
+name: "LeilôAI: Canário da credencial"
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Semanal. Escopo de credencial não muda sozinho, mas muda quando alguém
+    # "conserta" uma permissão faltando, e esse alguém não vai avisar.
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: leiloai-canario-credencial
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  provar:
+    name: provar o escopo
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: O que a credencial pode e o que ela NAO pode
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
+          ALVO: RenatoPassos1/leilao-watch
+        run: |
+          set -uo pipefail
+          falhas=0
+
+          # Espera-se SUCESSO: sem isto o CI do LeilôAI não funciona.
+          deve_poder() {
+            local rotulo="$1"; shift
+            if "$@" >/dev/null 2>&1; then
+              echo "  PODE       $rotulo   OK"
+            else
+              echo "::error::a credencial PRECISA poder: $rotulo"
+              falhas=$((falhas + 1))
+            fi
+          }
+
+          # Espera-se RECUSA. Se passar, o escopo é maior do que o desenhado, e
+          # o ponto inteiro da troca se perde.
+          nao_deve_poder() {
+            local rotulo="$1"; shift
+            if "$@" >/dev/null 2>&1; then
+              echo "::error::a credencial NAO deveria poder: $rotulo"
+              falhas=$((falhas + 1))
+            else
+              echo "  NAO PODE   $rotulo   OK"
+            fi
+          }
+
+          echo "=== o que ela precisa poder ==="
+          deve_poder "ler o branch do repositorio alvo" \
+            gh api "repos/$ALVO/branches/feat/landing" --jq .commit.sha
+          deve_poder "ler o status de um commit" \
+            gh api "repos/$ALVO/commits/feat%2Flanding/status" --jq .state
+          deve_poder "ler as execucoes de Actions" \
+            gh api "repos/$ALVO/actions/runs?per_page=1" --jq .total_count
+          deve_poder "ler conteudo de arquivo" \
+            gh api "repos/$ALVO/contents/package.json?ref=feat/landing" --jq .sha
+
+          echo
+          echo "=== o que ela NAO pode ==="
+
+          # 1. Alcance. Qualquer OUTRO repositório privado do dono. Sem este
+          #    caso o teste não distingue "1 repositório" de "todos".
+          nao_deve_poder "alcancar outro repositorio privado (richesse-club)" \
+            gh api "repos/RenatoPassos1/richesse-club" --jq .id
+          nao_deve_poder "alcancar outro repositorio privado (tudo-venda)" \
+            gh api "repos/RenatoPassos1/tudo-venda" --jq .id
+
+          # 2. Admin. Colaboradores e secrets são leitura de administração.
+          nao_deve_poder "listar colaboradores do alvo (admin)" \
+            gh api "repos/$ALVO/collaborators" --jq length
+          nao_deve_poder "listar secrets do alvo (admin)" \
+            gh api "repos/$ALVO/actions/secrets" --jq .total_count
+
+          # 3. Escrita de conteúdo. Este é o caso que justificou mover o ref de
+          #    aprovação para o repositório público: enquanto ele era criado no
+          #    privado, esta linha teria de passar, e uma credencial que julga
+          #    um repositório não precisa poder escrever nele.
+          nao_deve_poder "criar ref no repositorio alvo (contents write)" \
+            gh api -X POST "repos/$ALVO/git/refs" \
+              -f ref=refs/canario/nao-deve-existir -f sha=0000000000000000000000000000000000000000
+
+          # 4. Disparar workflow no alvo.
+          nao_deve_poder "disparar workflow no alvo (actions write)" \
+            gh api -X POST "repos/$ALVO/actions/workflows/ci.yml/dispatches" -f ref=feat/landing
+
+          echo
+          if [ "$falhas" -eq 0 ]; then
+            echo "CANARIO VERDE: a credencial faz o necessario e nada alem."
+          else
+            echo "CANARIO VERMELHO: $falhas divergencia(s) de escopo."
+          fi
+          {
+            echo "### Canário da credencial de veredito"
+            echo ""
+            echo "divergencias: $falhas"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$falhas" -eq 0 ]
