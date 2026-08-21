@@ -269,7 +269,12 @@ jobs:
           # sobrar e MATERIAL DE CHAVE, entao a busca e pelo cabecalho de
           # chave privada, em ~/.ssh e no temporario do runner, que e onde a
           # action de fato grava.
-          sobrou=$(grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" 2>/dev/null | wc -l)
+          # `|| true` NAO e frouxidao: `grep -r` devolve 2 quando um dos
+          # diretorios nao existe, e `~/.ssh` pode simplesmente nao existir.
+          # Com `bash -e` e `pipefail`, esse 2 derruba o passo inteiro e a
+          # mensagem de erro nao diz nada sobre credencial. Foi o que
+          # aconteceu no run 32437290314.
+          sobrou=$( { grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true; } | wc -l)
           if [ "$sobrou" -ne 0 ]; then
             echo "FAIL sobrou material de chave privada em disco"; falhas=$((falhas+1))
           fi
