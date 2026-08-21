@@ -62,3 +62,17 @@ jobs:
         env:
           DIFF_BASE: ${{ steps.base.outputs.valor }}
         run: bash .github/scripts/proibir-exfiltracao.sh
+
+      # A ENTRADA DO CI PUBLICO DO LEILOAI.
+      #
+      # Aquele workflow recebe `sha` e `mode` de fora e, com eles, faz checkout
+      # de um repositorio PRIVADO e executa o codigo que vier. Se a validacao
+      # afrouxar, o input deixa de escolher "qual commit" e passa a escolher
+      # "o que roda".
+      #
+      # O teste EXTRAI o regex do proprio workflow, entao afrouxar la reprova
+      # aqui, com a mensagem dizendo o que passou a ser aceito. Conferido nos
+      # dois sentidos em 20/08/2026.
+      - name: Entrada do CI publico recusa o que precisa recusar
+        if: always()
+        run: bash .github/scripts/testar-entrada-ci-publico.sh
