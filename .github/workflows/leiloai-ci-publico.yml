@@ -308,18 +308,43 @@ jobs:
           # runner e o `/tmp` que o `mktemp` usa quando `TMPDIR` nao aponta
           # para o do runner.
           #
-          # `|| true` NAO e frouxidao: `grep -r` devolve 2 quando um dos
-          # diretorios nao existe, e `~/.ssh` pode simplesmente nao existir.
-          # Com `bash -e` e `pipefail`, esse 2 derruba o passo inteiro e a
-          # mensagem de erro nao diz nada sobre credencial. Foi o que
-          # aconteceu no run 32437290314.
-          sobrou=$( { grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | wc -l)
+          # O PADRAO E MONTADO EM TEMPO DE EXECUCAO, e isso nao e enfeite.
+          #
+          # O GitHub grava o corpo de cada `run:` num arquivo dentro de
+          # `RUNNER_TEMP`. Se a expressao procurada aparecer literal aqui, a
+          # busca encontra O PROPRIO SCRIPT e a trava reprova sozinha, para
+          # sempre. Medido no run 32438505669: o unico achado era
+          # `_temp/<uuid>.sh`, que e este passo.
+          #
+          # E a mesma familia do `pgrep -f "<padrao>"` que casa com a propria
+          # linha de comando, e ja custou dois diagnosticos errados neste
+          # projeto.
+          MARCA=$(printf 'PRI%sKEY' 'VATE ')
+
+          # CONTROLE POSITIVO, antes da busca de verdade.
+          #
+          # Depois de montar o padrao em execucao, esta busca pode passar a
+          # nao achar NADA por estar quebrada, e o resultado seria idêntico ao
+          # de um job limpo. Um scanner que responde zero quando quebra e pior
+          # do que nao ter scanner, porque produz confianca: esta mesma
+          # armadilha ja custou um relatorio inteiro neste projeto em
+          # 20/08/2026.
+          CTRL="${RUNNER_TEMP:-/tmp}/controle-de-varredura-$$"
+          printf -- '-----BEGIN OPENSSH %s-----\n' "$MARCA" > "$CTRL"
+          achou_ctrl=$( { grep -rl "$MARCA" "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true; } | grep -c "controle-de-varredura-$$" || true)
+          rm -f "$CTRL"
+          if [ "$achou_ctrl" -eq 0 ]; then
+            echo "::error::a varredura de material de chave nao acusa nem o controle positivo"
+            exit 2
+          fi
+
+          sobrou=$( { grep -rl "$MARCA" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | wc -l)
           if [ "$sobrou" -ne 0 ]; then
             echo "FAIL sobrou material de chave privada em disco"
             # CAMINHO, nunca conteudo. Sem isto a mensagem nao permite
             # diagnosticar nada, e uma trava que so diz "reprovado" acaba
             # sendo desligada por quem precisa entregar.
-            { grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | sed 's/^/  achado em: /'
+            { grep -rl "$MARCA" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | sed 's/^/  achado em: /'
             falhas=$((falhas+1))
           fi
           [ "$falhas" -eq 0 ] && echo "CREDENTIAL_PERSISTED false" || exit 1
