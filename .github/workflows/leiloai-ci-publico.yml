@@ -315,7 +315,12 @@ jobs:
           # aconteceu no run 32437290314.
           sobrou=$( { grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | wc -l)
           if [ "$sobrou" -ne 0 ]; then
-            echo "FAIL sobrou material de chave privada em disco"; falhas=$((falhas+1))
+            echo "FAIL sobrou material de chave privada em disco"
+            # CAMINHO, nunca conteudo. Sem isto a mensagem nao permite
+            # diagnosticar nada, e uma trava que so diz "reprovado" acaba
+            # sendo desligada por quem precisa entregar.
+            { grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | sed 's/^/  achado em: /'
+            falhas=$((falhas+1))
           fi
           [ "$falhas" -eq 0 ] && echo "CREDENTIAL_PERSISTED false" || exit 1
 
