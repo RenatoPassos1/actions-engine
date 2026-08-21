@@ -259,7 +259,18 @@ jobs:
           KH="$(mktemp)"
           trap 'shred -u "$ARQ_CHAVE" 2>/dev/null || rm -f "$ARQ_CHAVE"; rm -f "$KH"' EXIT
 
-          printf '%s' "$CHAVE" > "$ARQ_CHAVE"  # trava-exfiltracao: permitido -- grava a chave de deploy num arquivo 600, destruido com shred na linha seguinte e coberto por trap; renomear a variavel para fugir da trava silenciaria a protecao em vez de documentar a excecao
+          # SEM marcador de excecao aqui, e isso foi medido: esta linha NAO e
+          # acusada por nenhuma das onze regras da trava (`RE_ECOAR_VAR_SEGREDA`
+          # exige KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL em CAIXA ALTA, e
+          # `CHAVE` e `ARQ_CHAVE` nao casam). Um marcador aqui nao documentaria
+          # excecao nenhuma: ele faria o `varrer()` pular esta linha em TODAS as
+          # regras, para sempre, inclusive se um dia ela ganhar um `| base64` ou
+          # um `| tee`.
+          #
+          # Se a intencao for proteger este padrao, o caminho e o oposto: uma
+          # regra NOVA que reconheca "gravar segredo em arquivo" sem depender do
+          # nome da variavel. Ai sim a excecao auditavel faria sentido.
+          printf '%s' "$CHAVE" > "$ARQ_CHAVE"
           # A action escreve a chave com quebra de linha final; o ssh exige.
           printf '\n' >> "$ARQ_CHAVE"
 

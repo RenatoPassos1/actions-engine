@@ -28,6 +28,10 @@
 #
 #   {"verificados":14,"saudaveis":13,"sem_rota":1,"inexistentes":0,"falhas":0}
 #
+# Isto nao e ilustracao: e a resposta MEDIDA em 21/08/2026, nos runs
+# 32436996985 e 32443511539 do canario, contra as 14 bases do registro. O unico
+# `sem_rota` e um alvo no ar que nao publica `/health`.
+#
 # `inexistentes` e a categoria que o monitor antigo nao tinha, e e a unica que
 # importa de verdade: alvo que nao existe nao vai voltar sozinho.
 #

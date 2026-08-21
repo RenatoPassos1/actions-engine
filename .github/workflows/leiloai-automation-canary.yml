@@ -139,11 +139,15 @@ jobs:
           caso "metodo GET"            405 "$(chamar '' GET)"
 
           # ---- POSITIVO: a varredura de saude, que nao dispara coleta.
-          # 240 s, e nao os 120 do resto: a varredura de saude percorre os
-          # alvos EM SERIE com 12 s de teto cada, entao o pior caso passa de
-          # 168 s. Com 120 o canario receberia 000 no unico caso positivo e
-          # acusaria o disparador por causa de alvo lento. O vigia ja usa 240
-          # para a mesma chamada.
+          # 240 s, e nao os 120 do resto. A varredura de saude percorre 14
+          # alvos EM LOTES DE 4, com 12 s de teto cada, entao o pior caso e
+          # ~48 s. Os 240 sao folga deliberada para o registro crescer, e
+          # casam com o que o vigia ja usa na mesma chamada.
+          #
+          # A primeira versao deste comentario dizia "em serie, pior caso
+          # 168 s", que era o algoritmo ANTERIOR: a troca por lotes entrou na
+          # mesma rodada, e comentario que descreve algoritmo que nao existe
+          # mais e a semente da proxima calibragem errada.
           CODIGO=$(chamar '{"job_id":"J900"}' POST sim 240)
           caso "saude (positivo)"      200 "$CODIGO"
 
