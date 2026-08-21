@@ -1,324 +1,217 @@
-# LeilôAI — Crons (fonte primária)
+# LeilôAI: agendador de tarefas automatizadas.
 #
-# Dispara workers Cloudflare que não têm cron próprio (limite Free = 5 triggers).
-# Também roda hard-delete de contas soft-deleted há mais de 30 dias (LGPD).
+# ============================================================================
+# O QUE MUDOU EM 21/08/2026, E POR QUE
+# ============================================================================
 #
-# Secrets necessários:
-#   LEILOAI_DISPARO_SECRET  — secret x-disparo-secret dos workers
-#   LEILOAI_SUPABASE_URL    — https://<ref>.supabase.co
-#   LEILOAI_SUPABASE_SR     — service_role key
+# Este arquivo agendava a coleta chamando cada worker pelo endereco. Como o
+# repositorio e PUBLICO, isso publicava a lista de fontes em tres superficies
+# diferentes, e nenhuma delas parece um vazamento a primeira vista:
+#
+#   1. o YAML, com o subdominio de cada worker, que nomeia o que ele le;
+#   2. o NOME DO JOB na aba Actions e na API, idem, incluindo uma matriz de 27
+#      unidades federativas de uma unica fonte;
+#   3. o LOG, porque cada passo fazia `tee | head -c 500` da resposta do
+#      worker, que traz nome de coletor e quantidade processada.
+#
+# Medido no dia: 18 casamentos do lexico de fontes so neste arquivo, o maior
+# de todo o repositorio.
+#
+# Agora o agendador conhece apenas identificadores opacos. A relacao
+# `J1xx -> alvo real` vive no repositorio privado, e o servidor decide o
+# destino: nao existe campo de URL, caminho ou comando nesta chamada.
+#
+# ============================================================================
+# O QUE SAIU DAQUI, E POR QUE NAO E PERDA
+# ============================================================================
+#
+# O job `hard_delete_lgpd` foi REMOVIDO. Ele chamava a API REST do projeto
+# Supabase Cloud antigo com a chave de service role, e aquele projeto nao
+# existe mais: medido em 20/08/2026, `curl: (6) Could not resolve host`, e
+# falha diaria desde entao. A obrigacao continua cumprida, por outro caminho
+# e melhor: a VPS roda `api/cron/lgpd-hard-delete` as 03:45, e essa rota
+# anonimiza o e-mail, apaga o login e preserva as linhas fiscais, enquanto o
+# DELETE cru daqui apagaria a linha inteira.
+#
+# Com ele saiu tambem a unica referencia deste workflow a uma chave de service
+# role guardada em repositorio publico.
+#
+# ============================================================================
+# AUTENTICACAO
+# ============================================================================
+#
+# OIDC. Cada job pede ao GitHub um token de minutos que diz qual repositorio e
+# qual workflow esta chamando, e o servidor exige as duas coisas. Nao ha
+# segredo de vida longa aqui: `permissions` global e vazia, e cada job so
+# pede `id-token: write`.
 
-name: "LeilôAI: Crons"
+name: "LeilôAI: agendador"
 
 on:
   schedule:
-    # bancos + ingestao_diaria (doe/djen/datajud/agregadores): 11h UTC (08h BRT)
-    - cron: '0 11 * * *'
-    # wc1: a cada 2h
-    - cron: '0 */2 * * *'
-    # hard-delete LGPD + w11_safety: diário, 03h UTC (00h BRT)
-    - cron: '0 3 * * *'
-    # marketplaces: a cada 4h (ML API + scrapers OLX/ZAP/VivaReal + Webmotors/iCarros/FIPE)
-    - cron: '15 */4 * * *'
-    # rental + querido-diario (diarios oficiais municipais): 1x/dia 09h UTC
-    - cron: '0 9 * * *'
-    # w09: a cada 3h (extracao de editais via OpenAI)
-    - cron: '20 */3 * * *'
-    # inss (editais de imoveis INSS): a cada 12h
-    - cron: '30 */12 * * *'
-    # seuimovelbb (scan IDs BB): a cada 6h
-    - cron: '40 */6 * * *'
-    # spyleiloes (sitemap UFs): a cada 6h
-    - cron: '50 */6 * * *'
+    - cron: "0 11 * * *"
+    - cron: "0 */2 * * *"
+    - cron: "0 3 * * *"
+    - cron: "15 */4 * * *"
+    - cron: "0 9 * * *"
+    - cron: "20 */3 * * *"
+    - cron: "30 */12 * * *"
+    - cron: "40 */6 * * *"
+    - cron: "50 */6 * * *"
   workflow_dispatch:
     inputs:
-      job:
-        description: "Qual cron rodar"
+      grupo:
+        description: "Grupo a executar (G1..G9), ou todos"
         required: true
-        default: "all"
+        default: "todos"
         type: choice
-        options:
-          - all
-          - bancos
-          - wc1
-          - hard_delete
-          - marketplaces
-          - rental
-          - wc1_ia
-          - w11
-          - inss
-          - seuimovelbb
-          - spyleiloes
-          - querido_diario
+        options: [todos, G1, G2, G3, G4, G5, G6, G7, G8, G9]
+
+permissions: {}
 
 concurrency:
-  group: leiloai-crons-${{ github.event.schedule || github.event.inputs.job }}
+  group: leiloai-agendador-${{ github.event.schedule || github.event.inputs.grupo }}
   cancel-in-progress: false
 
+env:
+  ALVO: https://leiloai.com/api/automation/run
+  AUDIENCIA: leiloai-automation
+
 jobs:
-  bancos:
-    if: >-
-      github.event.schedule == '0 11 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'bancos'
+  # ==========================================================================
+  # Decide o que rodar. Roda codigo fixo deste arquivo, sem credencial nenhuma.
+  # ==========================================================================
+  alvos:
+    name: resolver alvos
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 3
+    outputs:
+      lista: ${{ steps.calc.outputs.lista }}
     steps:
-      - name: Dispara worker bancos
+      - name: Calcular lista de tarefas
+        id: calc
         env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
+          AGENDA: ${{ github.event.schedule }}
+          GRUPO: ${{ github.event.inputs.grupo }}
         run: |
           set -euo pipefail
-          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w06.conta-removida-da-historia.invalid/run" \
-            | tee /tmp/resp.json | head -c 500
-          echo
 
-  wc1:
-    if: >-
-      github.event.schedule == '0 */2 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'wc1'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Dispara worker wc1
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-wc1.conta-removida-da-historia.invalid/run" \
-            | tee /tmp/resp.json | head -c 500
-          echo
+          # Grupos. O numero e opaco de proposito: nao diz o que faz nem
+          # quantas fontes ha por familia.
+          g1='{"id":"J101"},{"id":"J103"},{"id":"J104"},{"id":"J105"},{"id":"J106"}'
+          g2='{"id":"J102"}'
+          g3='{"id":"J110"}'
+          g4='{"id":"J107"}'
+          g5='{"id":"J108"},{"id":"J114"}'
+          g6='{"id":"J109"}'
+          g7='{"id":"J111"}'
+          g8='{"id":"J112"}'
+          # G9 e dividido em 27 partes. O indice nao revela para que serve.
+          g9=""
+          for i in $(seq 1 27); do
+            g9="${g9}${g9:+,}{\"id\":\"J113\",\"parte\":$i}"
+          done
 
-  ingestao_diaria:
-    if: >-
-      github.event.schedule == '0 11 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'bancos'
+          escolher() {
+            case "$1" in
+              G1) printf '%s' "$g1" ;; G2) printf '%s' "$g2" ;; G3) printf '%s' "$g3" ;;
+              G4) printf '%s' "$g4" ;; G5) printf '%s' "$g5" ;; G6) printf '%s' "$g6" ;;
+              G7) printf '%s' "$g7" ;; G8) printf '%s' "$g8" ;; G9) printf '%s' "$g9" ;;
+              *) printf '' ;;
+            esac
+          }
+
+          if [ -n "${AGENDA:-}" ]; then
+            case "$AGENDA" in
+              "0 11 * * *")    ITENS=$(escolher G1) ;;
+              "0 */2 * * *")   ITENS=$(escolher G2) ;;
+              "0 3 * * *")     ITENS=$(escolher G3) ;;
+              "15 */4 * * *")  ITENS=$(escolher G4) ;;
+              "0 9 * * *")     ITENS=$(escolher G5) ;;
+              "20 */3 * * *")  ITENS=$(escolher G6) ;;
+              "30 */12 * * *") ITENS=$(escolher G7) ;;
+              "40 */6 * * *")  ITENS=$(escolher G8) ;;
+              "50 */6 * * *")  ITENS=$(escolher G9) ;;
+              *) ITENS="" ;;
+            esac
+          elif [ "${GRUPO:-todos}" = "todos" ]; then
+            ITENS="$g1,$g2,$g3,$g4,$g5,$g6,$g7,$g8,$g9"
+          else
+            # `type: choice` ja restringe, e a allowlist abaixo e a trava real:
+            # entrada que nao casa vira lista vazia, nunca destino.
+            ITENS=$(escolher "${GRUPO}")
+          fi
+
+          if [ -z "$ITENS" ]; then
+            echo "lista=[]" >> "$GITHUB_OUTPUT"
+            echo "nada a fazer"
+            exit 0
+          fi
+          echo "lista=[$ITENS]" >> "$GITHUB_OUTPUT"
+          echo "tarefas: $(printf '[%s]' "$ITENS" | grep -o '"id"' | wc -l)"
+
+  # ==========================================================================
+  # Dispara. O nome do job que aparece publicamente e o id opaco.
+  # ==========================================================================
+  disparo:
+    name: ${{ matrix.alvo.id }}${{ matrix.alvo.parte && format('.{0}', matrix.alvo.parte) || '' }}
+    needs: alvos
+    if: needs.alvos.outputs.lista != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    permissions:
+      id-token: write
     strategy:
       fail-fast: false
+      # Teto conservador: a fonte dividida em 27 partes passaria a bater no
+      # servidor do produto, e nao mais direto no worker. 6 por vez mantem a
+      # vazao e nao transforma o agendador em teste de carga.
+      max-parallel: 6
       matrix:
-        worker: [doe, djen, datajud, agregadores]
+        alvo: ${{ fromJson(needs.alvos.outputs.lista) }}
     steps:
-      - name: Dispara worker ${{ matrix.worker }}
+      - name: Disparar tarefa
         env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-          WURL: "https://leiloai-ingest-${{ matrix.worker }}.conta-removida-da-historia.invalid/run"
+          ID: ${{ matrix.alvo.id }}
+          PARTE: ${{ matrix.alvo.parte }}
         run: |
           set -uo pipefail
-          # Workers de ingestao rodam longo no Cloudflare. Se estourar o
-          # --max-time (curl exit 28) o worker continua processando
-          # server-side e o job w11_safety re-dispara pela
-          # cadencia em jobs_log -> kickoff timeout nao derruba o cron.
-          # Erros de conexao/HTTP/auth seguem fatais (3 tentativas).
-          rc=0; HTTP=000
-          for attempt in 1 2 3; do
-            set +e
-            HTTP=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
-              -H "x-disparo-secret: ${DISPARO}" \
-              --max-time 600 "$WURL")
-            rc=$?
-            set -e
-            if [ "$rc" -eq 0 ] && [ "$HTTP" = "200" ]; then
-              head -c 500 /tmp/resp.txt; echo
-              exit 0
-            fi
-            if [ "$rc" -eq 28 ]; then
-              echo "::warning::${{ matrix.worker }}: kickoff excedeu 600s (curl 28); worker segue rodando, w11_safety cobre"
-              exit 0
-            fi
-            echo "tentativa ${attempt}: rc=${rc} http=${HTTP}"
-            [ "$attempt" -lt 3 ] && sleep $(( attempt * 20 ))
+
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCIA}" \
+            | jq -r '.value')
+          if [ -z "${TOKEN:-}" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::sem token OIDC"; exit 1
+          fi
+          echo "::add-mask::$TOKEN"  # trava-exfiltracao: permitido -- `::add-mask::` e o mecanismo do proprio GitHub para mascarar valor obtido em tempo de execucao; o runner consome a linha e nao a imprime, e sem ela o token nao seria mascarado se aparecesse em qualquer saida posterior
+
+          if [ -n "${PARTE:-}" ]; then
+            CORPO=$(printf '{"job_id":"%s","parte":%s}' "$ID" "$PARTE")
+          else
+            CORPO=$(printf '{"job_id":"%s"}' "$ID")
+          fi
+
+          # Ate 3 tentativas. `-K -` mantem o token fora da linha de comando.
+          rc=1
+          for tentativa in 1 2 3; do
+            HTTP=$(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | \
+              curl -sS -o /tmp/resp.json -w '%{http_code}' -K - \
+                -X POST -H 'content-type: application/json' \
+                --max-time 600 -d "$CORPO" "$ALVO") || HTTP=000
+            case "$HTTP" in
+              2*) rc=0; break ;;
+              429) echo "tentativa $tentativa: teto de taxa"; sleep 30 ;;
+              *)   echo "tentativa $tentativa: http=$HTTP"; sleep 15 ;;
+            esac
           done
-          echo "::error::${{ matrix.worker }}: falhou apos 3 tentativas (rc=${rc} http=${HTTP})"
-          head -c 500 /tmp/resp.txt 2>/dev/null || true
-          exit 1
 
-  marketplaces:
-    if: >-
-      github.event.schedule == '15 */4 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'marketplaces'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Dispara worker marketplaces (ML API + OLX/ZAP/VivaReal)
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w02.conta-removida-da-historia.invalid/run" \
-            --max-time 600 \
-            | head -c 500
-          echo
+          # A resposta so tem estado e correlacao. Sem nome de alvo, sem
+          # contagem: era exatamente isso que ia para o log antes.
+          ESTADO=$(jq -r '.estado // "sem_estado"' /tmp/resp.json 2>/dev/null || echo "ilegivel")
+          echo "TAREFA $ID${PARTE:+.$PARTE} http=$HTTP estado=$ESTADO"
 
-  rental:
-    if: >-
-      github.event.schedule == '0 9 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'rental'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Dispara worker rental (QuintoAndar/VivaReal/ZAP aluguel)
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w07.conta-removida-da-historia.invalid/run" \
-            --max-time 600 \
-            | head -c 500
-          echo
-
-  wc1_ia:
-    if: >-
-      github.event.schedule == '20 */3 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'wc1_ia'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Dispara worker w09 (extracao editais OpenAI)
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w09.conta-removida-da-historia.invalid/run" \
-            --max-time 600 \
-            | head -c 500
-          echo
-
-  w11_safety:
-    # Safety net: se algum cron acima falhar, w11 decide quais
-    # workers re-disparar com base na cadencia em jobs_log.
-    # Cron automatico diario 03h UTC (00h BRT) + dispatch manual.
-    if: >-
-      github.event.schedule == '0 3 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'w11'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Dispara w11 tick
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -X POST -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w11.conta-removida-da-historia.invalid/tick" \
-            | head -c 500
-          echo
-
-  inss:
-    # DESABILITADO 2026-05-06: worker leiloai-w10 retorna 404
-    # (worker deletado ou nao deployado mais). Cron 1x/dia falhando.
-    # Re-habilitar quando worker for recriado.
-    if: false  # github.event.inputs.job == 'inss' (manual override removido)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Dispara worker INSS (editais de imoveis)
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w10.conta-removida-da-historia.invalid/run" \
-            --max-time 600 \
-            | head -c 500
-          echo
-
-  seuimovelbb:
-    if: >-
-      github.event.schedule == '40 */6 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'seuimovelbb'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Dispara worker seuimovelbb (scan IDs BB)
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w03.conta-removida-da-historia.invalid/run" \
-            --max-time 600 \
-            | head -c 500
-          echo
-
-  spyleiloes:
-    if: >-
-      github.event.schedule == '50 */6 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'spyleiloes'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        uf:
-          [ac, al, ap, am, ba, ce, df, es, go, ma, mg, ms, mt, pa, pb, pe,
-           pi, pr, rj, rn, ro, rr, rs, sc, se, sp, to]
-    steps:
-      - name: Dispara worker spyleiloes ${{ matrix.uf }}
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w04.conta-removida-da-historia.invalid/run?uf=${{ matrix.uf }}" \
-            --max-time 600 \
-            | head -c 500
-          echo
-
-  querido_diario:
-    if: >-
-      github.event.schedule == '0 9 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'querido_diario'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Dispara worker querido-diario (diarios oficiais municipais)
-        env:
-          DISPARO: ${{ secrets.LEILOAI_DISPARO_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sSf -H "x-disparo-secret: ${DISPARO}" \
-            "https://leiloai-w01.conta-removida-da-historia.invalid/run" \
-            --max-time 600 \
-            | head -c 500
-          echo
-
-  hard_delete_lgpd:
-    if: >-
-      github.event.schedule == '0 3 * * *' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'hard_delete'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Hard-delete contas soft-deleted > 30 dias
-        env:
-          URL: ${{ secrets.LEILOAI_SUPABASE_URL }}
-          SR: ${{ secrets.LEILOAI_SUPABASE_SR }}
-        run: |
-          set -euo pipefail
-          # Busca contas soft-deleted há mais de 30 dias
-          LIMIT_DATE=$(date -u -d '30 days ago' '+%Y-%m-%dT%H:%M:%SZ')
-          echo "Procurando contas soft-deleted antes de: $LIMIT_DATE"
-          RESP=$(curl -sS -X DELETE \
-            "${URL}/rest/v1/users?deleted_at=lt.${LIMIT_DATE}&deleted_at=not.is.null" \
-            -H "apikey: ${SR}" \
-            -H "Authorization: Bearer ${SR}" \
-            -H "Prefer: return=minimal" \
-            -w "\n%{http_code}")
-          echo "Resposta: $RESP"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::tarefa nao aceita apos 3 tentativas (http=$HTTP)"
+            exit 1
+          fi

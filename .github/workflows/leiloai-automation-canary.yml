@@ -1,0 +1,143 @@
+# LeilôAI: canario do disparador opaco.
+#
+# ============================================================================
+# POR QUE ISTO EXISTE
+# ============================================================================
+#
+# Este repositorio e PUBLICO e agenda a coleta de um produto privado. Ate
+# 21/08/2026 ele fazia isso chamando cada worker pelo nome, o que publicava a
+# lista de fontes em tres lugares que ninguem olha como vazamento: o YAML, o
+# nome do job na aba Actions e a resposta ecoada no log.
+#
+# A troca foi para um disparador que so aceita identificador opaco. Este
+# workflow prova que a troca funciona ANTES de os workflows de producao
+# passarem a depender dela, e continua existindo depois como regressao.
+#
+# ============================================================================
+# ELE TAMBEM E A MATRIZ HOSTIL
+# ============================================================================
+#
+# Nao basta provar que o caminho feliz responde 200: um disparador que aceita
+# qualquer coisa tambem responde 200. Entao cada execucao tenta, de proposito,
+# o que NAO pode passar:
+#
+#   sem credencial          -> 401
+#   credencial invalida     -> 401
+#   id inexistente          -> 404
+#   id fora do formato      -> 400
+#   campo de caminho        -> 400   (o vetor de SSRF)
+#   campo de URL            -> 400
+#   parte fora da faixa     -> 400
+#   metodo GET              -> 405
+#
+# Se qualquer um desses passar, o job falha. Um `curl` bem-sucedido contra um
+# endpoint que deveria recusar e exatamente o defeito que este canario existe
+# para achar.
+
+name: "LeilôAI: canario do disparador"
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Uma vez por dia. Regressao de autenticacao nao avisa sozinha.
+    - cron: "37 5 * * *"
+
+permissions: {}
+
+concurrency:
+  group: leiloai-automation-canary
+  cancel-in-progress: false
+
+env:
+  ALVO: https://leiloai.com/api/automation/run
+  AUDIENCIA: leiloai-automation
+
+jobs:
+  canario:
+    name: provar disparador
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # A UNICA permissao. Ela nao alcanca conteudo, nem outro repositorio:
+      # serve so para pedir ao GitHub um token que diz quem esta chamando.
+      id-token: write
+    steps:
+      - name: Matriz positiva e negativa
+        run: |
+          set -uo pipefail
+
+          # ---- token OIDC. Nunca em argv, nunca impresso.
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCIA}" \
+            | jq -r '.value')
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::nao consegui obter token OIDC"; exit 1
+          fi
+          echo "::add-mask::$TOKEN"  # trava-exfiltracao: permitido -- `::add-mask::` e o mecanismo do proprio GitHub para mascarar valor obtido em tempo de execucao; o runner consome a linha e nao a imprime, e sem ela o token nao seria mascarado se aparecesse em qualquer saida posterior
+
+          # `curl -K -` le a configuracao do stdin, entao o token nao aparece
+          # na linha de comando nem no `ps` da maquina.
+          chamar() {
+            local corpo="$1" metodo="${2:-POST}" comAuth="${3:-sim}"
+            if [ "$comAuth" = "invalido" ]; then
+              # Credencial PRESENTE e errada. Sem este ramo, o caso cairia no
+              # ramo sem cabecalho e passaria pelo motivo errado, que e o
+              # jeito classico de um teste negativo nao exercer nada.
+              printf 'header = "Authorization: Bearer %s"\n' "nao.e.um.token.valido" | \
+                curl -sS -o /tmp/resp.json -w '%{http_code}' -K - \
+                  -X "$metodo" -H 'content-type: application/json' \
+                  --max-time 120 -d "$corpo" "$ALVO"
+            elif [ "$comAuth" = "sim" ]; then
+              printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | \
+                curl -sS -o /tmp/resp.json -w '%{http_code}' -K - \
+                  -X "$metodo" -H 'content-type: application/json' \
+                  --max-time 120 -d "$corpo" "$ALVO"
+            else
+              curl -sS -o /tmp/resp.json -w '%{http_code}' \
+                -X "$metodo" -H 'content-type: application/json' \
+                --max-time 120 -d "$corpo" "$ALVO"
+            fi
+          }
+
+          FALHAS=0
+          caso() {
+            local rotulo="$1" esperado="$2" obtido="$3"
+            if [ "$obtido" = "$esperado" ]; then
+              printf 'CASO %-26s esperado=%s obtido=%s  PASS\n' "$rotulo" "$esperado" "$obtido"
+            else
+              printf 'CASO %-26s esperado=%s obtido=%s  FAIL\n' "$rotulo" "$esperado" "$obtido"
+              FALHAS=$((FALHAS + 1))
+            fi
+          }
+
+          # ---- NEGATIVOS primeiro: se o endpoint estiver aberto, o positivo
+          # tambem passaria e nao provaria nada.
+          caso "sem credencial"        401 "$(chamar '{"job_id":"J900"}' POST nao)"
+          caso "credencial invalida"   401 "$(chamar '{"job_id":"J900"}' POST invalido)"
+          caso "id inexistente"        404 "$(chamar '{"job_id":"J777"}')"
+          caso "id fora do formato"    400 "$(chamar '{"job_id":"../../etc"}')"
+          caso "id minusculo"          400 "$(chamar '{"job_id":"j101"}')"
+          caso "campo de caminho"      400 "$(chamar '{"job_id":"J900","path":"/api/cron/x"}')"
+          caso "campo de url"          400 "$(chamar '{"job_id":"J900","url":"http://169.254.169.254/"}')"
+          caso "campo de comando"      400 "$(chamar '{"job_id":"J900","cmd":"id"}')"
+          caso "corpo em lista"        400 "$(chamar '[{"job_id":"J900"}]')"
+          caso "corpo invalido"        400 "$(chamar 'nao-e-json')"
+          caso "parte fora da faixa"   400 "$(chamar '{"job_id":"J113","parte":99}')"
+          caso "parte em job simples"  400 "$(chamar '{"job_id":"J101","parte":1}')"
+          caso "metodo GET"            405 "$(chamar '' GET)"
+
+          # ---- POSITIVO: a varredura de saude, que nao dispara coleta.
+          CODIGO=$(chamar '{"job_id":"J900"}')
+          caso "saude (positivo)"      200 "$CODIGO"
+
+          # A resposta so tem contagem. Impressa inteira de proposito: se um
+          # dia ela passar a carregar nome de alvo, aparece aqui e a trava de
+          # exfiltracao deste repositorio reprova.
+          echo "RESPOSTA $(cat /tmp/resp.json)"
+
+          if [ "$FALHAS" -ne 0 ]; then
+            echo "::error::$FALHAS caso(s) do canario falharam"
+            exit 1
+          fi
+          echo "CANARIO OK 14/14"

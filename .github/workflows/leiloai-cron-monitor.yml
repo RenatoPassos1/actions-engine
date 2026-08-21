@@ -1,118 +1,114 @@
-# LeiloAI - Cron Monitor: pinga health dos 18 workers Cloudflare a cada 15 min.
-# Abre GitHub issue (label "incident") se algum worker retornar 5xx ou timeout.
-# Nunca derruba CI: failure de worker so abre issue, job sai sucesso.
+# LeilôAI: vigia dos alvos de automacao.
+#
+# ============================================================================
+# O QUE ELE FAZIA, E O DEFEITO QUE ESTAVA ESCONDIDO NELE
+# ============================================================================
+#
+# Ate 21/08/2026 este workflow tinha uma matriz com 18 enderecos de worker
+# escritos aqui dentro, batia `/health` em cada um e abria ISSUE PUBLICA
+# nomeando o worker quando algo falhava. Tres superficies de vazamento no
+# mesmo arquivo: o YAML, o nome do job (`Pinga <slug>`) e a issue, que fica
+# no repositorio para sempre.
+#
+# E ele estava mentindo. Medido em 21/08/2026, na ultima execucao antes da
+# troca: 6 dos 18 alvos responderam 404, e o workflow terminou verde, 20 de
+# 20 execucoes. Desses 6, cinco nao eram falha de saude: os alvos NAO
+# EXISTEM. A Cloudflare responde `error code: 1042` para subdominio sem worker
+# publicado, e o monitor tratava isso como um 404 qualquer. Em dois casos o
+# endereco vigiado diferia por uma letra do endereco realmente chamado pelo
+# agendador, ou seja, o monitor olhava para um lugar que nunca existiu
+# enquanto o alvo de verdade rodava ao lado, sem vigia.
+#
+# ============================================================================
+# COMO ELE FICOU
+# ============================================================================
+#
+# A lista de alvos saiu daqui e vive no registro privado. Este workflow pede
+# UMA tarefa opaca de varredura e recebe so contagem:
+#
+#   {"verificados":13,"saudaveis":12,"sem_rota":1,"inexistentes":0,"falhas":0}
+#
+# `inexistentes` e a categoria que o monitor antigo nao tinha, e e a unica que
+# importa de verdade: alvo que nao existe nao vai voltar sozinho.
+#
+# `sem_rota` distingue o worker que esta no ar mas nao publica `/health`. Ele
+# NAO reprova a execucao, porque nao e queda: e cobertura de monitoramento
+# faltando, e reprovar por isso treinaria todo mundo a ignorar o alarme.
+#
+# Quem falhou fica no log PRIVADO do servidor, com correlacao. Nao ha mais
+# issue publica com nome de alvo.
 
-name: "LeiloAI: Cron Monitor"
+name: "LeilôAI: vigia de automacao"
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # a cada 15 minutos
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
-permissions:
-  issues: write
-  contents: read
+permissions: {}
 
 concurrency:
-  group: leiloai-cron-monitor
+  group: leiloai-vigia-automacao
   cancel-in-progress: false
 
-jobs:
-  health_check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        worker:
-          - { slug: ingest-bb,             url: 'https://leiloai-ingest-bb.conta-removida-da-historia.invalid' }
-          - { slug: ingest-caixa,          url: 'https://leiloai-ingest-caixa.conta-removida-da-historia.invalid' }
-          - { slug: w05,    url: 'https://leiloai-w05.conta-removida-da-historia.invalid' }
-          - { slug: w08,        url: 'https://leiloai-w08.conta-removida-da-historia.invalid' }
-          - { slug: ingest-detran,         url: 'https://leiloai-ingest-detran.conta-removida-da-historia.invalid' }
-          - { slug: w12,           url: 'https://leiloai-w12.conta-removida-da-historia.invalid' }
-          - { slug: w13,            url: 'https://leiloai-w13.conta-removida-da-historia.invalid' }
-          - { slug: ingest-dou,            url: 'https://leiloai-ingest-dou.conta-removida-da-historia.invalid' }
-          - { slug: ingest-marketplaces,   url: 'https://leiloai-w02.conta-removida-da-historia.invalid' }
-          - { slug: w01, url: 'https://leiloai-w01.conta-removida-da-historia.invalid' }
-          - { slug: ingest-receita,        url: 'https://leiloai-ingestao-receita.conta-removida-da-historia.invalid' }
-          - { slug: ingest-rental,         url: 'https://leiloai-w07.conta-removida-da-historia.invalid' }
-          - { slug: ingest-seuimovelbb,    url: 'https://leiloai-ingest-seuimovelbb.conta-removida-da-historia.invalid' }
-          - { slug: ingest-spyleiloes,     url: 'https://leiloai-ingest-spyleiloes.conta-removida-da-historia.invalid' }
-          - { slug: ingest-bancos,         url: 'https://leiloai-w06.conta-removida-da-historia.invalid' }
-          - { slug: wc1,            url: 'https://leiloai-wc1.conta-removida-da-historia.invalid' }
-          - { slug: w09,         url: 'https://leiloai-w09.conta-removida-da-historia.invalid' }
-          - { slug: w11,          url: 'https://leiloai-w11.conta-removida-da-historia.invalid' }
-    steps:
-      - name: Pinga ${{ matrix.worker.slug }}
-        id: ping
-        continue-on-error: true
-        run: |
-          set +e
-          # /health quando existir; fallback para / na raiz
-          CODE=$(curl -sS --max-time 15 -o /tmp/body.txt -w '%{http_code}' \
-            "${{ matrix.worker.url }}/health" || echo "000")
-          if [ "$CODE" = "404" ]; then
-            CODE=$(curl -sS --max-time 15 -o /tmp/body.txt -w '%{http_code}' \
-              "${{ matrix.worker.url }}/" || echo "000")
-          fi
-          echo "code=$CODE" >> "$GITHUB_OUTPUT"
-          BODY=$(head -c 400 /tmp/body.txt 2>/dev/null || echo "")
-          {
-            echo "body<<EOF"
-            echo "$BODY"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-          echo "[$CODE] ${{ matrix.worker.url }}"
-          # 000 = curl falhou (timeout/DNS), 5xx = erro do worker
-          if [ "$CODE" = "000" ] || { [ "$CODE" -ge 500 ] 2>/dev/null && [ "$CODE" -lt 600 ] 2>/dev/null; }; then
-            echo "incident=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "incident=false" >> "$GITHUB_OUTPUT"
-          fi
-          # Sempre exit 0 para nao derrubar CI
-          exit 0
+env:
+  ALVO: https://leiloai.com/api/automation/run
+  AUDIENCIA: leiloai-automation
 
-      - name: Abre issue se incidente em ${{ matrix.worker.slug }}
-        if: steps.ping.outputs.incident == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const dia = new Date().toISOString().slice(0, 10);
-            const slug = '${{ matrix.worker.slug }}';
-            const url = '${{ matrix.worker.url }}';
-            const code = '${{ steps.ping.outputs.code }}';
-            const body = `${{ steps.ping.outputs.body }}`;
-            const titulo = `[incident] worker ${slug} indisponivel ${dia}`;
-            const corpo = [
-              `Worker: \`${slug}\``,
-              `URL: ${url}/health`,
-              `Status: ${code}`,
-              ``,
-              `Resposta:`,
-              `\`\`\``,
-              body || '(vazio)',
-              `\`\`\``,
-              ``,
-              `Detectado em: ${new Date().toISOString()}`,
-              `Workflow: cron-monitor matrix`,
-            ].join('\n');
-            const { data: existentes } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: 'incident',
-              state: 'open',
-              per_page: 100,
-            });
-            // Dedup: 1 issue por worker por dia
-            if (existentes.find(i => i.title === titulo)) {
-              console.log('Issue ja existe para hoje, ignorando.');
-              return;
-            }
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: titulo,
-              body: corpo,
-              labels: ['incident', 'leiloai-monitor'],
-            });
+jobs:
+  vigia:
+    name: varredura
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - name: Varrer alvos
+        run: |
+          set -uo pipefail
+
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCIA}" \
+            | jq -r '.value')
+          if [ -z "${TOKEN:-}" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::sem token OIDC"; exit 1
+          fi
+          echo "::add-mask::$TOKEN"  # trava-exfiltracao: permitido -- `::add-mask::` e o mecanismo do proprio GitHub para mascarar valor obtido em tempo de execucao; o runner consome a linha e nao a imprime, e sem ela o token nao seria mascarado se aparecesse em qualquer saida posterior
+
+          HTTP=$(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | \
+            curl -sS -o /tmp/saude.json -w '%{http_code}' -K - \
+              -X POST -H 'content-type: application/json' \
+              --max-time 240 -d '{"job_id":"J900"}' "$ALVO") || HTTP=000
+
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::varredura nao respondeu (http=$HTTP)"
+            exit 1
+          fi
+
+          VER=$(jq -r '.verificados // 0' /tmp/saude.json)
+          SAU=$(jq -r '.saudaveis // 0' /tmp/saude.json)
+          SEM=$(jq -r '.sem_rota // 0' /tmp/saude.json)
+          INE=$(jq -r '.inexistentes // 0' /tmp/saude.json)
+          FAL=$(jq -r '.falhas // 0' /tmp/saude.json)
+
+          echo "ALVOS verificados=$VER saudaveis=$SAU sem_rota=$SEM inexistentes=$INE falhas=$FAL"
+          {
+            echo "verificados=$VER"
+            echo "saudaveis=$SAU"
+            echo "sem_rota=$SEM"
+            echo "inexistentes=$INE"
+            echo "falhas=$FAL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Zero verificados seria varredura vazia relatada como sucesso, que e
+          # a forma mais silenciosa de um monitor morrer.
+          if [ "$VER" -eq 0 ]; then
+            echo "::error::varredura nao olhou alvo nenhum"
+            exit 1
+          fi
+          if [ "$INE" -gt 0 ] || [ "$FAL" -gt 0 ]; then
+            echo "::error::$INE alvo(s) inexistente(s) e $FAL falha(s); detalhe no log privado"
+            exit 1
+          fi
+          echo "VIGIA OK"
