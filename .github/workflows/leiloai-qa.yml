@@ -20,6 +20,7 @@ on:
         options:
           - all
           - smoke
+          - render
 
 jobs:
   smoke:
@@ -56,6 +57,68 @@ jobs:
             echo "::error::$falhas rotas retornaram status diferente de 200"
             exit 1
           fi
+
+
+  # ==========================================================================
+  # RENDERIZACAO, e nao so codigo de status.
+  # ==========================================================================
+  #
+  # O job `smoke` acima confere 200 em nove rotas. Isso e cego para o modo de
+  # falha que este projeto ja viveu duas vezes em 08/08/2026: imagem
+  # construida sem o secret do BuildKit sobe com `/api/health` respondendo
+  # 200, login morto e home sem itens. Codigo de status nao ve nada disso.
+  #
+  # Os cinco testes que veem (h1 visivel e nao vazio, cartoes de plano,
+  # redirect de area logada, forma do JSON da API publica, content-type do
+  # sitemap) existiam em `apps/web/e2e/smoke.spec.ts` e eram disparados por um
+  # workflow que NUNCA executou uma vez. Ele foi removido em 21/08/2026, e
+  # deixar os testes sem dono seria trocar cobertura inerte por cobertura
+  # nenhuma, entao eles passam a rodar aqui, contra producao.
+  #
+  # Nao expoe fonte: os cinco alvos sao paginas publicas do produto.
+  render:
+    name: renderizacao
+    if: >-
+      github.event.schedule == '0 6 * * *' ||
+      github.event.inputs.job == 'all' ||
+      github.event.inputs.job == 'render'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout do repositorio privado (unico step com credencial)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          repository: RenatoPassos1/leilao-watch
+          ref: feat/landing
+          # Chave de deploy SOMENTE LEITURA, presa a este repositorio.
+          ssh-key: ${{ secrets.LEILOAI_CHECKOUT_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Credencial nao persistiu
+        run: |
+          set -uo pipefail
+          falhas=0
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1; then
+            echo "FAIL extraheader presente"; falhas=$((falhas+1))
+          fi
+          if git config --local --get core.sshCommand >/dev/null 2>&1; then
+            echo "FAIL core.sshCommand persistiu"; falhas=$((falhas+1))
+          fi
+          [ "$falhas" -eq 0 ] && echo "CREDENTIAL_PERSISTED false" || exit 1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.1.0
+        with:
+          node-version: "22"
+
+      - name: Instalar e rodar
+        working-directory: apps/web
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npx playwright install chromium --with-deps
+          # A saida do Playwright nomeia so rotas publicas do produto.
+          npx playwright test --reporter=line
 
   # JOB REMOVIDO EM 21/08/2026.
   #

@@ -19,15 +19,20 @@
 #
 # Nao basta provar que o caminho feliz responde 200: um disparador que aceita
 # qualquer coisa tambem responde 200. Entao cada execucao tenta, de proposito,
-# o que NAO pode passar:
+# 13 coisas que NAO podem passar, e so depois o caso positivo:
 #
 #   sem credencial          -> 401
 #   credencial invalida     -> 401
 #   id inexistente          -> 404
 #   id fora do formato      -> 400
+#   id minusculo            -> 400
 #   campo de caminho        -> 400   (o vetor de SSRF)
-#   campo de URL            -> 400
+#   campo de URL            -> 400   (idem, apontando para metadata)
+#   campo de comando        -> 400
+#   corpo em lista          -> 400
+#   corpo invalido          -> 400
 #   parte fora da faixa     -> 400
+#   parte em job simples    -> 400
 #   metodo GET              -> 405
 #
 # Se qualquer um desses passar, o job falha. Um `curl` bem-sucedido contra um
@@ -71,7 +76,13 @@ jobs:
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCIA}" \
             | jq -r '.value')
-          if [ -z "${TOKEN:-}" ]; then
+          # `jq -r .value` sobre uma resposta de ERRO imprime a string
+          # literal `null`, que nao e vazia e passaria pela guarda antiga. O
+          # canario seguiria com um bearer invalido: os dois casos de
+          # credencial passariam por acaso e os outros 12 falhariam com 401 no
+          # lugar do esperado, apontando "o disparador respondeu errado"
+          # quando o defeito real foi nao ter conseguido o token.
+          if [ -z "${TOKEN:-}" ] || [ "$TOKEN" = "null" ]; then
             echo "::error::nao consegui obter token OIDC"; exit 1
           fi
           echo "::add-mask::$TOKEN"  # trava-exfiltracao: permitido -- `::add-mask::` e o mecanismo do proprio GitHub para mascarar valor obtido em tempo de execucao; o runner consome a linha e nao a imprime, e sem ela o token nao seria mascarado se aparecesse em qualquer saida posterior
@@ -79,7 +90,7 @@ jobs:
           # `curl -K -` le a configuracao do stdin, entao o token nao aparece
           # na linha de comando nem no `ps` da maquina.
           chamar() {
-            local corpo="$1" metodo="${2:-POST}" comAuth="${3:-sim}"
+            local corpo="$1" metodo="${2:-POST}" comAuth="${3:-sim}" tmax="${4:-120}"
             if [ "$comAuth" = "invalido" ]; then
               # Credencial PRESENTE e errada. Sem este ramo, o caso cairia no
               # ramo sem cabecalho e passaria pelo motivo errado, que e o
@@ -87,16 +98,16 @@ jobs:
               printf 'header = "Authorization: Bearer %s"\n' "nao.e.um.token.valido" | \
                 curl -sS -o /tmp/resp.json -w '%{http_code}' -K - \
                   -X "$metodo" -H 'content-type: application/json' \
-                  --max-time 120 -d "$corpo" "$ALVO"
+                  --max-time "$tmax" -d "$corpo" "$ALVO"
             elif [ "$comAuth" = "sim" ]; then
               printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | \
                 curl -sS -o /tmp/resp.json -w '%{http_code}' -K - \
                   -X "$metodo" -H 'content-type: application/json' \
-                  --max-time 120 -d "$corpo" "$ALVO"
+                  --max-time "$tmax" -d "$corpo" "$ALVO"
             else
               curl -sS -o /tmp/resp.json -w '%{http_code}' \
                 -X "$metodo" -H 'content-type: application/json' \
-                --max-time 120 -d "$corpo" "$ALVO"
+                --max-time "$tmax" -d "$corpo" "$ALVO"
             fi
           }
 
@@ -128,7 +139,12 @@ jobs:
           caso "metodo GET"            405 "$(chamar '' GET)"
 
           # ---- POSITIVO: a varredura de saude, que nao dispara coleta.
-          CODIGO=$(chamar '{"job_id":"J900"}')
+          # 240 s, e nao os 120 do resto: a varredura de saude percorre os
+          # alvos EM SERIE com 12 s de teto cada, entao o pior caso passa de
+          # 168 s. Com 120 o canario receberia 000 no unico caso positivo e
+          # acusaria o disparador por causa de alvo lento. O vigia ja usa 240
+          # para a mesma chamada.
+          CODIGO=$(chamar '{"job_id":"J900"}' POST sim 240)
           caso "saude (positivo)"      200 "$CODIGO"
 
           # A resposta so tem contagem. Impressa inteira de proposito: se um

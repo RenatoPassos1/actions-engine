@@ -93,14 +93,26 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      # A conferencia cobre as marcas dos DOIS modos de credencial, e nao so
+      # do modo antigo por token: desde 21/08/2026 o checkout aqui usa chave
+      # SSH, cuja marca seria `core.sshCommand` no `.git/config`, e um teste
+      # cego para ela devolveria PASS produzindo confianca falsa. Ele roda
+      # ANTES do script do repositorio privado, que e o unico codigo de
+      # terceiro deste job.
       - name: Credencial nao persistiu
         run: |
           set -uo pipefail
-          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1 \
-             || git remote -v 2>/dev/null | grep -qE '://[^/@[:space:]]+@'; then
-            echo "FAIL credencial persistida"; exit 1
+          falhas=0
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1; then
+            echo "FAIL extraheader presente"; falhas=$((falhas+1))
           fi
-          echo "CREDENTIAL_PERSISTED false"
+          if git remote -v 2>/dev/null | grep -qE '://[^/@[:space:]]+@'; then
+            echo "FAIL remote com credencial embutida"; falhas=$((falhas+1))
+          fi
+          if git config --local --get core.sshCommand >/dev/null 2>&1; then
+            echo "FAIL core.sshCommand persistiu"; falhas=$((falhas+1))
+          fi
+          [ "$falhas" -eq 0 ] && echo "CREDENTIAL_PERSISTED false" || exit 1
 
       # O script imprime uma linha de contagem. Nenhum nome, nenhuma URL.
       - name: Medir o lote

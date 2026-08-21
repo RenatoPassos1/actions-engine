@@ -26,7 +26,7 @@
 # A lista de alvos saiu daqui e vive no registro privado. Este workflow pede
 # UMA tarefa opaca de varredura e recebe so contagem:
 #
-#   {"verificados":13,"saudaveis":12,"sem_rota":1,"inexistentes":0,"falhas":0}
+#   {"verificados":14,"saudaveis":13,"sem_rota":1,"inexistentes":0,"falhas":0}
 #
 # `inexistentes` e a categoria que o monitor antigo nao tinha, e e a unica que
 # importa de verdade: alvo que nao existe nao vai voltar sozinho.

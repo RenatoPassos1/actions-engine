@@ -31,7 +31,10 @@
 #
 # O que esta migracao acrescenta e a disciplina que faltava:
 #
-#   1. o token so aparece no step de checkout, com `persist-credentials: false`;
+#   1. a credencial de checkout e uma chave de deploy SOMENTE LEITURA presa
+#      ao repositorio privado, ela so existe durante o clone, num arquivo 600
+#      destruido com `shred` antes do primeiro estagio, e um `trap` cobre o
+#      caminho de erro;
 #   2. um step confere, sem imprimir nada, que ele NAO ficou no `.git/config`;
 #   3. o job que executa codigo do repositorio privado nao recebe secret nenhum;
 #   4. quem publica o veredito e OUTRO job, em VM nova, que nao faz checkout e
@@ -208,25 +211,41 @@ jobs:
     permissions: {}
     steps:
       # ======================================================================
-      # O UNICO step com credencial, e o clone e feito a mao de proposito.
+      # O UNICO step com credencial, e o clone e feito a mao.
       # ======================================================================
       #
-      # `actions/checkout` com `ssh-key` funciona, e deixa a chave privada num
-      # arquivo dentro de `RUNNER_TEMP` ate o passo de POS-job, que roda
-      # DEPOIS de tudo. Ou seja: a chave fica legivel em disco durante os 15
-      # estagios em que codigo do repositorio privado executa, inclusive
-      # durante o `npm ci`. Medido no run 32437624891: a conferencia deste
-      # proprio workflow reprovou por isso, e estava certa.
+      # CORRECAO DE 21/08/2026, e ela importa mais do que a decisao.
       #
-      # Fazendo o clone aqui, a vida da credencial e exatamente o tempo do
-      # clone: ela nasce num `mktemp` com permissao 600 e e destruida na linha
-      # seguinte, antes de qualquer codigo de terceiro tocar a maquina. O
-      # `trap` cobre o caminho de erro, senao uma falha no fetch deixaria a
+      # A primeira versao deste comentario afirmava, como medicao, que
+      # `actions/checkout` com `ssh-key` deixa a chave em `RUNNER_TEMP` ate o
+      # pos-job, e citava o run 32437624891 como prova. ISSO ESTAVA ERRADO, e a
+      # evidencia esta em tres execucoes seguidas:
+      #
+      #   32437624891  com `actions/checkout` + ssh-key   FAIL "sobrou chave"
+      #   32438203003  ja com o clone manual              FAIL "sobrou chave"
+      #   32438505669  com o caminho impresso             o unico achado era
+      #                                                   `_temp/<uuid>.sh`
+      #
+      # Ou seja: a reprovacao aconteceu IGUAL com e sem a action, e o que a
+      # varredura encontrava era o proprio script do passo, porque o GitHub
+      # grava o corpo de cada `run:` num arquivo dentro de `RUNNER_TEMP` e a
+      # expressao procurada estava escrita ali. Nao existe medicao minha de
+      # chave deixada em disco pela action, e afirmar que existia era pior do
+      # que nao ter afirmado nada: e numero inventado num repositorio publico.
+      #
+      # O clone manual FICA, por motivos que nao dependem daquela afirmacao:
+      #
+      #   1. a vida da credencial e visivel aqui, neste arquivo, entre o
+      #      `mktemp` e o `shred`, em vez de depender da limpeza de pos-passo
+      #      de uma action de terceiro;
+      #   2. `core.sshCommand` nunca chega a ser gravado no `.git/config`;
+      #   3. as chaves de host do github.com vem da API deles por HTTPS, entao
+      #      `StrictHostKeyChecking=yes` tem em que se apoiar sem hard-code de
+      #      chave que um dia rotaciona;
+      #   4. uma dependencia a menos no unico passo que toca credencial.
+      #
+      # O `trap` cobre o caminho de erro: falha no fetch nao pode deixar a
       # chave para tras justamente no cenario ruim.
-      #
-      # As chaves de host do github.com vem da API deles por HTTPS, entao o
-      # `StrictHostKeyChecking=yes` tem em que se apoiar sem hard-code de uma
-      # chave que um dia rotaciona.
       - name: Checkout do repositorio privado (unico step com credencial)
         env:
           CHAVE: ${{ secrets.LEILOAI_CHECKOUT_KEY }}
@@ -236,20 +255,20 @@ jobs:
 
           printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
 
-          ARQCH="$(mktemp)"; chmod 600 "$ARQCH"
+          ARQ_CHAVE="$(mktemp)"; chmod 600 "$ARQ_CHAVE"
           KH="$(mktemp)"
-          trap 'shred -u "$ARQCH" 2>/dev/null || rm -f "$ARQCH"; rm -f "$KH"' EXIT
+          trap 'shred -u "$ARQ_CHAVE" 2>/dev/null || rm -f "$ARQ_CHAVE"; rm -f "$KH"' EXIT
 
-          printf '%s' "$CHAVE" > "$ARQCH"
+          printf '%s' "$CHAVE" > "$ARQ_CHAVE"  # trava-exfiltracao: permitido -- grava a chave de deploy num arquivo 600, destruido com shred na linha seguinte e coberto por trap; renomear a variavel para fugir da trava silenciaria a protecao em vez de documentar a excecao
           # A action escreve a chave com quebra de linha final; o ssh exige.
-          printf '\n' >> "$ARQCH"
+          printf '\n' >> "$ARQ_CHAVE"
 
           curl -sS --max-time 20 https://api.github.com/meta > /tmp/gh-meta.json
           jq -r '.ssh_keys[] | "github.com " + .' /tmp/gh-meta.json > "$KH"
           rm -f /tmp/gh-meta.json
           [ -s "$KH" ] || { echo "::error::nao obtive as chaves de host do github"; exit 1; }
 
-          export GIT_SSH_COMMAND="ssh -i $ARQCH -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=yes -o BatchMode=yes"
+          export GIT_SSH_COMMAND="ssh -i $ARQ_CHAVE -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=yes -o BatchMode=yes"
 
           git init -q .
           git remote add origin "git@github.com:$REPO_PRIVADO.git"
@@ -267,7 +286,7 @@ jobs:
           git checkout -q FETCH_HEAD
 
           # A credencial morre AQUI, antes de qualquer estagio.
-          shred -u "$ARQCH" 2>/dev/null || rm -f "$ARQCH"
+          shred -u "$ARQ_CHAVE" 2>/dev/null || rm -f "$ARQ_CHAVE"
           rm -f "$KH"
           trap - EXIT
           unset GIT_SSH_COMMAND
