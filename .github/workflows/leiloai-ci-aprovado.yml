@@ -183,7 +183,24 @@ jobs:
 
           gh api -X POST "repos/$AQUI/git/refs" \
             -f ref="$REF" -f sha="$OBJ" --jq .ref
-          echo "aprovado: $REF"
+
+          # A MESMA aprovacao tambem vira ref de tag, apontando para o MESMO
+          # objeto. Nao e redundancia: o portao exige as duas consistentes.
+          #
+          # No desenho antigo, com o ref no repositorio privado, ele apontava
+          # para o proprio commit aprovado, e o portao conferia isso. Aquela
+          # verificacao nao cabe aqui, porque o commit privado nao existe neste
+          # repositorio. Sem substituto, um ref apontando para objeto qualquer
+          # passaria, e um teste de 21/08/2026 provou exatamente isso.
+          #
+          # O que esta camada defende e ERRO, nao atacante: quem tem escrita
+          # aqui pode criar as duas refs certinhas, do mesmo jeito que antes
+          # podia apontar o ref para o commit exato. Contra escrita indevida
+          # quem defende e a permissao, nunca o formato do ref.
+          gh api -X POST "repos/$AQUI/git/refs" \
+            -f ref="refs/tags/ci-aprovado-$SHA" -f sha="$OBJ" --jq .ref
+
+          echo "aprovado: $REF (com ref de tag pareada)"
 
       - name: Dizer alto quando NAO aprovou
         if: steps.decidir.outcome != 'success'
