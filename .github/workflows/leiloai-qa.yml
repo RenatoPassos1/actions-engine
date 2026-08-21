@@ -1,4 +1,6 @@
-# LeiloAI - QA: smoke test publico diario + db-lint semanal
+# LeiloAI - QA: smoke test publico diario.
+#
+# O job `db-lint` semanal saiu em 21/08/2026; o motivo esta no fim do arquivo.
 # Nao pode causar custo, so hits HTTP em rotas publicas
 
 name: "LeiloAI: QA"
@@ -7,8 +9,7 @@ on:
   schedule:
     # Smoke diario as 6h UTC (3h BRT, fora do pico)
     - cron: '0 6 * * *'
-    # DB-lint semanal domingo 5h UTC
-    - cron: '0 5 * * 0'
+
   workflow_dispatch:
     inputs:
       job:
@@ -19,7 +20,6 @@ on:
         options:
           - all
           - smoke
-          - db-lint
 
 jobs:
   smoke:
@@ -57,21 +57,17 @@ jobs:
             exit 1
           fi
 
-  db-lint:
-    if: >-
-      github.event.schedule == '0 5 * * 0' ||
-      github.event.inputs.job == 'all' ||
-      github.event.inputs.job == 'db-lint'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checa RLS em tabelas publicas
-        env:
-          URL: ${{ secrets.LEILOAI_SUPABASE_URL }}
-          SR: ${{ secrets.LEILOAI_SUPABASE_SR }}
-        run: |
-          set -euo pipefail
-          # Busca todas tabelas com RLS desligado
-          payload='{"query":"select schemaname,tablename from pg_tables where schemaname='"'"'public'"'"' and rowsecurity=false"}'
-          # Aqui so um placeholder: execucao real usaria mcp_supabase ou psql.
-          echo "DB lint: verificacao automatica de RLS (placeholder, pipeline a evoluir)"
+  # JOB REMOVIDO EM 21/08/2026.
+  #
+  # Ele se chamava `db-lint`, recebia a URL e a chave de service role do
+  # projeto Supabase Cloud, e o unico passo dele era um `echo` dizendo
+  # "verificacao automatica de RLS (placeholder, pipeline a evoluir)". Um job
+  # com nome de verificacao de seguranca que nao verificava nada, verde em 20
+  # de 20 execucoes, apontando para um projeto que nao existe mais.
+  #
+  # Nao ha substituto aqui de proposito: o banco vive na VPS e nao e
+  # alcancavel deste repositorio publico sem expor credencial. Medi o estado
+  # hoje para o buraco nao ficar invisivel: das 116 tabelas de `public`, 105
+  # tem RLS e 11 nao; dessas 11, quatro sao legiveis por `anon` ou
+  # `authenticated`, e tres foram aprovadas por decisao registrada no lado
+  # privado, em `services/ingestion/qualidade/leitura-anonima.test.ts`.

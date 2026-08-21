@@ -86,7 +86,10 @@ jobs:
         with:
           repository: RenatoPassos1/leilao-watch
           ref: ${{ steps.alvo.outputs.sha }}
-          token: ${{ secrets.LEILOAI_REPO_PAT }}
+          # Chave de deploy SOMENTE LEITURA do repositorio privado, presa a
+          # ele (id 160866978). Substitui um PAT que, medido em 20/08/2026,
+          # alcancava 13 dos 15 repositorios do dono com permissao de admin.
+          ssh-key: ${{ secrets.LEILOAI_CHECKOUT_KEY }}
           persist-credentials: false
           fetch-depth: 1
 
