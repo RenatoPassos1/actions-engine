@@ -47,17 +47,33 @@
 
 name: "LeilôAI: agendador"
 
+# AGENDAMENTO DESLIGADO EM 21/08/2026, e o motivo importa mais que a linha.
+#
+# Medido: este agendador disparava, recebia HTTP 200, terminava verde e o alvo
+# NAO PERSISTIA NADA. Um disparo controlado fechou em 41 segundos e nao deixou
+# uma unica linha gravada, enquanto o outro plano de execucao gravava mais de
+# mil registros na mesma janela. Vinte e quatro horas de historico confirmam:
+# toda gravacao bate a cadencia do outro plano, sem uma execucao fora dela.
+#
+# O alvo relatava o proprio fracasso no CORPO da resposta, e o disparador lia o
+# corpo so para fechar a conexao e o descartava. Isso ja foi corrigido do lado
+# privado, e a partir de agora uma falha assim reprova em vez de virar verde.
+#
+# Manter o agendamento ligado depois de saber disso seria pior do que
+# desliga-lo: ele consumiria minuto de Actions a cada ciclo, ficaria vermelho
+# a cada ciclo com a correcao nova, e sobretudo sustentaria a crenca de que
+# estas tarefas rodam por aqui. Alguem que acreditasse nisso poderia remover o
+# agendamento do outro plano por parecer duplicata, e a coleta pararia por
+# inteiro com este painel seguindo verde.
+#
+# O `workflow_dispatch` CONTINUA, de proposito: e por ele que se mede se o alvo
+# voltou a funcionar, sem precisar reescrever nada.
+#
+# RELIGAR NAO E DESFAZER ESTE COMMIT. Religar e uma migracao de plano, e a
+# SOURCE_EXECUTION_POLICY exige baseline, shadow 3x, comparacao ponta a ponta,
+# cutover sem dupla persistencia e tres ciclos reais. Ligar isto de volta com o
+# outro plano ativo cria a dupla persistencia que hoje NAO existe.
 on:
-  schedule:
-    - cron: "0 11 * * *"
-    - cron: "0 */2 * * *"
-    - cron: "0 3 * * *"
-    - cron: "15 */4 * * *"
-    - cron: "0 9 * * *"
-    - cron: "20 */3 * * *"
-    - cron: "30 */12 * * *"
-    - cron: "40 */6 * * *"
-    - cron: "50 */6 * * *"
   workflow_dispatch:
     inputs:
       grupo:
