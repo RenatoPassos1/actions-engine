@@ -87,7 +87,6 @@ jobs:
         env:
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
-          REPO_PAT: ${{ secrets.REPO_PAT }}
         run: |
           ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
@@ -102,7 +101,16 @@ jobs:
                git reset --hard origin/main
              else
                rm -rf \"\$REPO_DIR\"
-               git clone --depth=1 --branch=main \"https://x-access-token:$REPO_PAT@github.com/RenatoPassos1/richesse-club.git\" \"\$REPO_DIR\"
+               # SSH com o alias dedicado, e nao HTTPS com token na URL.
+               # Ate 21/08/2026 esta linha era
+               #   um clone HTTPS com o token interpolado direto na URL,
+               # e tinha tres defeitos de uma vez: o shell LOCAL expandia o token
+               # antes de mandar, entao ele aparecia no `ps` do runner E no `ps`
+               # da VPS; e o `git clone` grava a URL inteira em `.git/config`,
+               # deixando o token em texto claro no disco de producao.
+               # O alias `github-richesse` ja existia na VPS, com chave dedicada
+               # e `IdentitiesOnly yes`, alcancando UM repositorio.
+               git clone --depth=1 --branch=main git@github-richesse:RenatoPassos1/richesse-club.git \"\$REPO_DIR\"
                cd \"\$REPO_DIR\"
              fi
              HEAD_SHORT=\$(git rev-parse --short HEAD)

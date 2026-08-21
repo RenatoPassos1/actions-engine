@@ -352,13 +352,13 @@ estrutural() {
 
     # 13. Workflow do LeiloAI usando o PAT multiprojeto. Medido em 20/08/2026:
     #     `REPO_PAT` alcanca 13 repositorios privados, e existe
-    #     `LEILOAI_REPO_PAT` dedicado. Uma falha no caminho do LeiloAI nao
+    #     `LEILOAI_STATUS_PAT` dedicado. Uma falha no caminho do LeiloAI nao
     #     pode entregar os outros doze.
     case "$(basename "$f")" in
       leiloai-*)
         linhas=$(grep -nE 'secrets\.REPO_PAT\b' "$f" | cut -d: -f1)
         for l in $linhas; do
-          acusar "$f" "$l" "workflow do LeiloAI usando o REPO_PAT multiprojeto (13 repositorios). Use LEILOAI_REPO_PAT, que e dedicado" "$(sed -n "${l}p" "$f" | cut -c1-120)"
+          acusar "$f" "$l" "workflow do LeiloAI usando o REPO_PAT multiprojeto (13 repositorios). Use LEILOAI_STATUS_PAT, que alcanca 1 repositorio sem admin" "$(sed -n "${l}p" "$f" | cut -c1-120)"
         done
 
         # 14. Action presa a TAG num workflow do LeiloAI. Tag e movel: quem

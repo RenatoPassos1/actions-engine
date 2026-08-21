@@ -25,7 +25,7 @@
 #
 # Medido antes de mexer: esse token JA EXISTE aqui e JA E USADO. O
 # `leiloai-ci-aprovado.yml` busca `scripts/avaliar-checks.mjs` do repositorio
-# privado com `LEILOAI_REPO_PAT`, e o `leiloai-dockerignore.yml` busca outro
+# privado com `LEILOAI_STATUS_PAT`, e o `leiloai-dockerignore.yml` busca outro
 # script pelo mesmo caminho. A capacidade de ler o repositorio privado a partir
 # daqui nao e criada por esta migracao; ela e de antes.
 #
@@ -141,7 +141,7 @@ jobs:
       - name: Resolver SHA e decidir se precisa rodar
         id: alvo
         env:
-          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
           ENTRADA_SHA: ${{ inputs.sha }}
           ENTRADA_MODE: ${{ inputs.mode }}
           FORCAR: ${{ inputs.forcar }}
@@ -385,7 +385,7 @@ jobs:
         run: |
           set -uo pipefail
           presentes=0
-          for nome in REPO_PAT LEILOAI_REPO_PAT LEILOAI_CHECKOUT_KEY ORACLE_SSH_KEY ORACLE_HOST ORACLE_USER \
+          for nome in REPO_PAT LEILOAI_REPO_PAT LEILOAI_STATUS_PAT LEILOAI_CHECKOUT_KEY ORACLE_SSH_KEY ORACLE_HOST ORACLE_USER \
                       SUPABASE_SERVICE_ROLE_KEY LEILOAI_SUPABASE_SR LEILOAI_SUPABASE_DB_URL \
                       DATABASE_URL STRIPE_SECRET_KEY BREVO_API_KEY CRON_SECRET \
                       LEILOAI_DISPARO_SECRET GH_TOKEN GITHUB_TOKEN; do
@@ -437,7 +437,7 @@ jobs:
     steps:
       - name: Publicar commit status e acordar a aprovacao
         env:
-          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
           TOKEN_DISPARO: ${{ github.token }}
           SHA: ${{ needs.resolver.outputs.sha }}
           RESULTADO: ${{ needs.compute.result }}

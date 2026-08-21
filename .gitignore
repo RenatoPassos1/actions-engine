@@ -1,0 +1,67 @@
+# ============================================================================
+# ESTE REPOSITORIO E PUBLICO
+# ============================================================================
+#
+# Criado em 21/08/2026. Ate esta data o repositorio nao tinha .gitignore
+# NENHUM, e havia no working tree um arquivo nao rastreado com DUAS chaves
+# `service_role` de Supabase em texto claro, uma delas do banco de producao.
+#
+# Ele nunca chegou a ser commitado, mas so por sorte: sem .gitignore, um
+# `git add -A` publicava as duas. Como o repositorio e publico, publicar aqui
+# nao e "commit errado", e vazamento com indexacao.
+#
+# A lei que rege isto e a LEI No 0 do LeiloAI (`GEMINI.md`, oito copias):
+# credencial nunca vira saida.
+# ============================================================================
+
+# --- credenciais e segredos, em qualquer profundidade
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.ppk
+credenciais*
+CREDENCIAIS*
+service-account*.json
+*service_role*
+*-secret.json
+*.secrets.json
+
+# --- scripts de migracao/uso unico que costumam carregar chave embutida
+migrate-*.js
+migrate-*.mjs
+migrate-*.ts
+
+# --- saida de execucao: log costuma carregar token e nome de fonte
+log.txt
+log_*.txt
+*.log
+logs/
+dumps/
+*.dump
+*.sql.gz
+
+# --- dependencias e build
+node_modules/
+.next/
+dist/
+build/
+out/
+.venv/
+__pycache__/
+*.pyc
+
+# --- lixo de sistema e de editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# --- saida de build de OUTRO projeto, nao pertence a este repositorio
+vektor-news/

@@ -70,7 +70,10 @@ on:
       - ".github/workflows/leiloai-ci-aprovado.yml"
 
 permissions:
-  contents: read
+  # `write` porque o ref de aprovacao passou a ser criado NESTE
+  # repositorio em 21/08/2026, e nao mais no privado. O passo
+  # "Criar o ref de aprovacao" explica o motivo inteiro.
+  contents: write
 
 concurrency:
   group: leiloai-ci-aprovado
@@ -91,7 +94,7 @@ jobs:
       - name: Coletar o estado do CI do HEAD (codigo fixo, com token)
         id: coletar
         env:
-          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
           BRANCH: ${{ matrix.branch }}
         run: |
           set -euo pipefail
@@ -136,23 +139,51 @@ jobs:
         continue-on-error: true
         run: node ci/avaliar-checks.mjs < ci/estado.json
 
+      # O ref de aprovacao mora NESTE repositorio desde 21/08/2026, e nao mais
+      # no privado. Duas razoes medidas, nao preferencia de estilo:
+      #
+      # 1. Escrever no privado obrigava a credencial a ter `Contents: write`
+      #    LA. Medi as oito chamadas de API que os workflows do LeiloAI fazem
+      #    e esta era a UNICA que pedia escrita: as outras sete leem commit,
+      #    branch, conteudo, status e runs. Uma credencial que julga um
+      #    repositorio nao precisa poder escrever nele.
+      #
+      # 2. Do outro lado, a VPS lia o ref por `git ls-remote` no privado, e por
+      #    isso o portao dependia da chave de deploy so para ler um veredito.
+      #    Em repositorio publico ele le sem credencial nenhuma.
+      #
+      # O que o ref carrega e um SHA de 40 hexadecimais. Nao ha nome de fonte,
+      # caminho nem conteudo: ele diz "o commit X passou", e X ja e opaco.
+      #
+      # Detalhe que nao e obvio: o SHA e do repositorio PRIVADO e o objeto NAO
+      # existe aqui, entao o ref nao pode apontar para aquele commit. Ele
+      # aponta para uma tag anotada criada aqui, e quem confere le o NOME do
+      # ref, que e exatamente o que o portao da VPS ja fazia.
       - name: Criar o ref de aprovacao
         if: steps.decidir.outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.coletar.outputs.sha }}
+          AQUI: ${{ github.repository }}
+          OBJETO_LOCAL: ${{ github.sha }}
         run: |
           set -euo pipefail
-          REPO=RenatoPassos1/leilao-watch
           REF="refs/ci-aprovado/$SHA"
 
-          if gh api "repos/$REPO/git/$REF" --jq .object.sha >/dev/null 2>&1; then
+          if gh api "repos/$AQUI/git/$REF" --jq .object.sha >/dev/null 2>&1; then
             echo "ja aprovado antes: $REF"
             exit 0
           fi
-          gh api -X POST "repos/$REPO/git/refs" \
-            -f ref="$REF" -f sha="$SHA" --jq .ref
-          echo "aprovado: $REF -> $SHA"
+
+          OBJ=$(gh api -X POST "repos/$AQUI/git/tags" \
+                  -f tag="ci-aprovado-$SHA" \
+                  -f message="CI verde no commit $SHA do repositorio privado" \
+                  -f object="$OBJETO_LOCAL" \
+                  -f type=commit --jq .sha)
+
+          gh api -X POST "repos/$AQUI/git/refs" \
+            -f ref="$REF" -f sha="$OBJ" --jq .ref
+          echo "aprovado: $REF"
 
       - name: Dizer alto quando NAO aprovou
         if: steps.decidir.outcome != 'success'

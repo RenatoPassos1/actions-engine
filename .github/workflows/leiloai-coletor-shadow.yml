@@ -63,7 +63,7 @@ jobs:
       - name: Validar o lote e resolver o SHA
         id: alvo
         env:
-          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
           ENTRADA_SHA: ${{ inputs.sha }}
           BATCH: ${{ inputs.batch }}
         run: |

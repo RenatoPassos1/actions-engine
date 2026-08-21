@@ -22,7 +22,7 @@
 #
 # NENHUM SEGREDO ALCANCA O CODIGO BUSCADO
 # O passo que executa o script vindo do repo privado roda com env LIMPA: o
-# `LEILOAI_REPO_PAT` so aparece nos passos de buscar e de publicar status, que
+# `LEILOAI_STATUS_PAT` so aparece nos passos de buscar e de publicar status, que
 # sao codigo fixo deste arquivo. O GitHub so injeta secret onde ele e
 # referenciado, entao o script baixado nao tem o que ler. Isto e defesa em
 # profundidade: escrever no leilao-watch ja exige acesso de escrita nele.
@@ -69,7 +69,7 @@ jobs:
       - name: Buscar o .dockerignore e o checador no repo privado
         id: buscar
         env:
-          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
           BRANCH: ${{ matrix.branch }}
         run: |
           set -euo pipefail
@@ -118,7 +118,7 @@ jobs:
       - name: Publicar o resultado no commit do leilao-watch
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.LEILOAI_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
           SHA: ${{ steps.buscar.outputs.sha }}
           RESULTADO: ${{ steps.real.outcome }}
           CORRIDA: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

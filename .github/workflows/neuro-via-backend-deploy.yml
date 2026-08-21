@@ -32,8 +32,15 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote add hf https://renatopassos:${HF_TOKEN}@huggingface.co/spaces/renatopassos/neuro-via
-          git push hf main --force
+          # O token NAO entra na URL. Ate 21/08/2026 esta linha interpolava
+          # ${HF_TOKEN} dentro do endereco do remoto, e isso o punha em duas
+          # superficies de uma vez: no `ps` do runner enquanto o comando roda,
+          # e gravado em texto claro no `.git/config` da arvore de trabalho.
+          # O helper abaixo entrega usuario e senha pelo pipe que o git abre,
+          # lendo da propria env, entao o valor nunca vira argumento nem
+          # arquivo.
+          git remote add hf https://huggingface.co/spaces/renatopassos/neuro-via
+          git -c credential.helper='!f() { echo username=renatopassos; echo "password=$HF_TOKEN"; }; f' push hf main --force
           echo "Pushed to HF Spaces successfully"
 
       - name: Deploy summary
