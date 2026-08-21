@@ -207,27 +207,53 @@ jobs:
     timeout-minutes: 30
     permissions: {}
     steps:
-      # O UNICO step que recebe credencial. Depois dele, nenhum outro tem
-      # `env:` com secret, entao o codigo privado que roda em seguida nao tem
-      # o que ler: o GitHub so injeta secret onde ele e referenciado.
+      # ======================================================================
+      # O UNICO step com credencial, e o clone e feito a mao de proposito.
+      # ======================================================================
+      #
+      # `actions/checkout` com `ssh-key` funciona, e deixa a chave privada num
+      # arquivo dentro de `RUNNER_TEMP` ate o passo de POS-job, que roda
+      # DEPOIS de tudo. Ou seja: a chave fica legivel em disco durante os 15
+      # estagios em que codigo do repositorio privado executa, inclusive
+      # durante o `npm ci`. Medido no run 32437624891: a conferencia deste
+      # proprio workflow reprovou por isso, e estava certa.
+      #
+      # Fazendo o clone aqui, a vida da credencial e exatamente o tempo do
+      # clone: ela nasce num `mktemp` com permissao 600 e e destruida na linha
+      # seguinte, antes de qualquer codigo de terceiro tocar a maquina. O
+      # `trap` cobre o caminho de erro, senao uma falha no fetch deixaria a
+      # chave para tras justamente no cenario ruim.
+      #
+      # As chaves de host do github.com vem da API deles por HTTPS, entao o
+      # `StrictHostKeyChecking=yes` tem em que se apoiar sem hard-code de uma
+      # chave que um dia rotaciona.
       - name: Checkout do repositorio privado (unico step com credencial)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
-        with:
-          repository: RenatoPassos1/leilao-watch
-          ref: ${{ needs.resolver.outputs.sha }}
-          # Chave de deploy SOMENTE LEITURA, criada em 21/08/2026 e presa a
-          # ESTE repositorio (id 160866978, `read_only: true`). Ela substitui
-          # aqui um PAT que, medido no mesmo dia, alcancava 13 dos 15
-          # repositorios do dono COM PERMISSAO DE ADMIN. Este e o job que
-          # executa 15 estagios de codigo privado logo depois do checkout,
-          # entao e o pior lugar do sistema para uma credencial ampla.
-          #
-          # Chave de deploy tambem nao fala com a API do GitHub: mesmo
-          # vazando, ela nao publica status, nao abre issue, nao le outro
-          # repositorio. So clona este.
-          ssh-key: ${{ secrets.LEILOAI_CHECKOUT_KEY }}
-          persist-credentials: false
-          # 2, e o numero tem motivo dos dois lados.
+        env:
+          CHAVE: ${{ secrets.LEILOAI_CHECKOUT_KEY }}
+          SHA: ${{ needs.resolver.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
+
+          ARQCH="$(mktemp)"; chmod 600 "$ARQCH"
+          KH="$(mktemp)"
+          trap 'shred -u "$ARQCH" 2>/dev/null || rm -f "$ARQCH"; rm -f "$KH"' EXIT
+
+          printf '%s' "$CHAVE" > "$ARQCH"
+          # A action escreve a chave com quebra de linha final; o ssh exige.
+          printf '\n' >> "$ARQCH"
+
+          curl -sS --max-time 20 https://api.github.com/meta > /tmp/gh-meta.json
+          jq -r '.ssh_keys[] | "github.com " + .' /tmp/gh-meta.json > "$KH"
+          rm -f /tmp/gh-meta.json
+          [ -s "$KH" ] || { echo "::error::nao obtive as chaves de host do github"; exit 1; }
+
+          export GIT_SSH_COMMAND="ssh -i $ARQCH -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=yes -o BatchMode=yes"
+
+          git init -q .
+          git remote add origin "git@github.com:$REPO_PRIVADO.git"
+          # Profundidade 2, e o numero tem motivo dos dois lados.
           #
           # Com 0, o git imprime `* [new branch] <nome>` para CADA branch do
           # repositorio privado. Medido em 20/08/2026 no primeiro shadow: 17
@@ -237,7 +263,15 @@ jobs:
           # Com 1 nao existe HEAD~1, e o secret scan do CI compara o delta do
           # commit contra o pai. Sem pai ele varreria vazio e diria "passou",
           # que e falso verde de trava de credencial.
-          fetch-depth: 2
+          git fetch -q --depth 2 origin "$SHA"
+          git checkout -q FETCH_HEAD
+
+          # A credencial morre AQUI, antes de qualquer estagio.
+          shred -u "$ARQCH" 2>/dev/null || rm -f "$ARQCH"
+          rm -f "$KH"
+          trap - EXIT
+          unset GIT_SSH_COMMAND
+          echo "CHECKOUT ok"
 
       # Conferencia sem imprimir conteudo: so PASS/FAIL. `.git/config` nunca
       # e ecoado, porque e exatamente onde o token ficaria.
@@ -257,24 +291,29 @@ jobs:
           if grep -qiE '(x-access-token|ghp_|github_pat_|Authorization)' .git/config 2>/dev/null; then
             echo "FAIL marca de token no config"; falhas=$((falhas+1))
           fi
-          # A partir de 21/08/2026 o checkout usa chave SSH, e a marca que
-          # sobraria e outra: `core.sshCommand` apontando para o arquivo de
-          # chave que a action escreve. `persist-credentials: false` deve
-          # remover os dois.
+          # O checkout e feito a mao neste workflow, entao `core.sshCommand`
+          # nem chega a ser gravado. A conferencia continua existindo porque
+          # ela protege do FUTURO: se alguem trocar o clone manual de volta
+          # por uma action, a marca aparece aqui.
           if git config --local --get core.sshCommand >/dev/null 2>&1; then
             echo "FAIL core.sshCommand persistiu"; falhas=$((falhas+1))
           fi
-          # Procurar por `~/.ssh/*` daria falso positivo, porque a action
-          # escreve `known_hosts` ali e isso nao e credencial. O que nao pode
-          # sobrar e MATERIAL DE CHAVE, entao a busca e pelo cabecalho de
-          # chave privada, em ~/.ssh e no temporario do runner, que e onde a
-          # action de fato grava.
+          if [ -n "${GIT_SSH_COMMAND:-}" ]; then
+            echo "FAIL GIT_SSH_COMMAND ainda exportado"; falhas=$((falhas+1))
+          fi
+          # Procurar por `~/.ssh/*` daria falso positivo, porque `known_hosts`
+          # mora ali e nao e credencial. O que nao pode sobrar e MATERIAL DE
+          # CHAVE, entao a busca e pelo cabecalho de chave privada, nos tres
+          # lugares onde ela poderia estar: a casa do usuario, o temporario do
+          # runner e o `/tmp` que o `mktemp` usa quando `TMPDIR` nao aponta
+          # para o do runner.
+          #
           # `|| true` NAO e frouxidao: `grep -r` devolve 2 quando um dos
           # diretorios nao existe, e `~/.ssh` pode simplesmente nao existir.
           # Com `bash -e` e `pipefail`, esse 2 derruba o passo inteiro e a
           # mensagem de erro nao diz nada sobre credencial. Foi o que
           # aconteceu no run 32437290314.
-          sobrou=$( { grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true; } | wc -l)
+          sobrou=$( { grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | wc -l)
           if [ "$sobrou" -ne 0 ]; then
             echo "FAIL sobrou material de chave privada em disco"; falhas=$((falhas+1))
           fi
