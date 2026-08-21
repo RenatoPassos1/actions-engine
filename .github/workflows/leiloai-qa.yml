@@ -116,7 +116,13 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --no-audit --no-fund
-          npx playwright install chromium --with-deps
+          # chromium E webkit: o `playwright.config.ts` tem dois projetos, e o
+          # `mobile` usa `devices["iPhone 13"]`, que roda em WebKit. Instalar
+          # so o chromium fazia 5 dos 10 testes morrerem com
+          # "Executable doesn't exist at .../webkit-2272/pw_run.sh".
+          # Medido no run 32444805777, disparado de proposito para provar o job
+          # antes de deixa-lo agendado.
+          npx playwright install chromium webkit --with-deps
           # A saida do Playwright nomeia so rotas publicas do produto.
           npx playwright test --reporter=line
 
