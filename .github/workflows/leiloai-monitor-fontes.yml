@@ -94,13 +94,37 @@ jobs:
         if: steps.chamada.outputs.p1 != '0' && steps.chamada.outputs.p1 != '-1'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
+        env:
+          # Os valores entram por `env:` e sao lidos com `process.env`, nunca
+          # interpolados com `${{ }}` dentro do `script:`.
+          #
+          # A diferenca nao e estilo. O template do Actions substitui `${{ }}`
+          # como TEXTO, antes do Node existir: um valor contendo aspa simples
+          # fecha a string e o resto vira JavaScript executado com o token do
+          # job. E estes valores vem do corpo de uma resposta HTTP, extraidos
+          # com `jq` sem nenhuma validacao de formato, ao contrario do SHA e do
+          # lote, que passam por allowlist neste mesmo repositorio.
+          #
+          # Apontado por review em 21/08/2026. O alcance era limitado
+          # (`issues: write`, sem acesso ao PAT), mas dava para fechar a issue
+          # que avisaria de uma fonte P1 caida, ou seja, esconder o incidente
+          # que o workflow existe para denunciar.
+          P1: ${{ steps.chamada.outputs.p1 }}
+          P2: ${{ steps.chamada.outputs.p2 }}
+          P3: ${{ steps.chamada.outputs.p3 }}
+          HEALTHY: ${{ steps.chamada.outputs.healthy }}
+          TOTAL: ${{ steps.chamada.outputs.total }}
+        with:
           script: |
             const dia = new Date().toISOString().slice(0, 10);
-            const p1 = '${{ steps.chamada.outputs.p1 }}';
-            const p2 = '${{ steps.chamada.outputs.p2 }}';
-            const p3 = '${{ steps.chamada.outputs.p3 }}';
-            const healthy = '${{ steps.chamada.outputs.healthy }}';
-            const total = '${{ steps.chamada.outputs.total }}';
+            // Numero ou nada. Se vier outra coisa, vira "?" em vez de virar
+            // codigo, e o texto da issue diz que o dado nao veio.
+            const num = (v) => (/^-?[0-9]{1,9}$/.test(String(v ?? '')) ? String(v) : '?');
+            const p1 = num(process.env.P1);
+            const p2 = num(process.env.P2);
+            const p3 = num(process.env.P3);
+            const healthy = num(process.env.HEALTHY);
+            const total = num(process.env.TOTAL);
             const titulo = `[incident] fontes P1 indisponiveis ${dia}`;
             const corpo = [
               `Resumo do monitoramento automatico de ${dia}:`,
@@ -137,10 +161,16 @@ jobs:
       - name: Abre issue se endpoint caiu (http_code != 200)
         if: steps.chamada.outputs.http_code != '200'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          # O codigo HTTP vem de um `curl`: quem responde escolhe o valor.
+          HTTP_CODE: ${{ steps.chamada.outputs.http_code }}
         with:
           script: |
             const dia = new Date().toISOString().slice(0, 10);
-            const code = '${{ steps.chamada.outputs.http_code }}';
+            // Numero ou nada: o valor vem de um `curl`, e servidor remoto
+            // escolhe o que responde.
+            const code = /^[0-9]{3}$/.test(String(process.env.HTTP_CODE ?? ''))
+              ? String(process.env.HTTP_CODE) : '?';
             const titulo = `[incident] monitor-fontes endpoint fora ${dia}`;
             const corpo = [
               `O endpoint /api/cron/monitorar-fontes respondeu com HTTP ${code}.`,

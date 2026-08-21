@@ -1,4 +1,4 @@
-# LeilôAI. Publica, como ref no repositorio privado, quais commits tem CI verde.
+# LeilôAI. Publica, no repositorio PUBLICO, quais commits do privado tem CI verde.
 #
 # ============================================================================
 # POR QUE ISTO EXISTE
@@ -15,24 +15,36 @@
 # verde?" antes de construir qualquer coisa.
 #
 # ============================================================================
-# POR QUE UM REF, E NAO A VPS CONSULTANDO A API
+# POR QUE UM REF, E POR QUE NESTE REPOSITORIO
 # ============================================================================
 #
-# Medido na propria VPS: ela **nao tem `gh`**, fala com o GitHub por **chave
-# SSH de deploy** (`git@github-leiloai:...`) e **nao guarda token nenhum**.
-# Criar um PAT e acao de interface, ou seja, dependeria do dono.
+# Medido na propria VPS: ela **nao tem `gh`** e nao guarda token nenhum. Entao
+# quem consulta a API e este workflow, onde o token ja existe, e o veredito
+# vira um PAR de refs:
 #
-# Entao quem consulta a API e este workflow, onde o token ja existe, e o
-# veredito vira um ref no proprio repositorio:
+#     refs/ci-aprovado/<sha>        ->  objeto T
+#     refs/tags/ci-aprovado-<sha>   ->  objeto T   (o MESMO)
 #
-#     refs/ci-aprovado/<sha>  ->  <sha>
+# Ate 21/08/2026 esse ref morava no repositorio PRIVADO e apontava para o
+# proprio commit. Mudou de lugar porque escrever la obrigava a credencial de
+# veredito a ter `Contents: write` no repositorio que ela julga, e essa era a
+# UNICA das oito chamadas de API do CI que pedia escrita. De quebra, a VPS
+# passou a ler o veredito **sem credencial nenhuma**, porque o repositorio e
+# publico.
 #
-# A VPS le por `git ls-remote`, com a chave que ja usa para o `git pull`. Sem
-# credencial nova em lugar nenhum.
+# O par existe porque a prova mudou junto. No privado o portao exigia que o
+# objeto apontado fosse exatamente o SHA perguntado; aqui aquele commit NAO
+# existe, entao o ref aponta para uma tag anotada local e a prova passou a ser
+# o NOME do ref. So o nome afrouxaria: um teste do mesmo dia mostrou que "ref
+# com o nome certo apontando para outro objeto" passava a ser aprovado, e ele
+# existe justamente para nunca ser. O par restaura a checagem.
 #
-# O ref aponta para o PROPRIO commit aprovado. Isso nao e detalhe: o portao
-# exige que o objeto apontado seja exatamente o SHA perguntado, entao um ref
-# nao consegue aprovar um commit diferente daquele que ele nomeia.
+# O que o par defende e ERRO, nao atacante: quem tem escrita aqui cria as duas
+# refs certinhas, do mesmo jeito que antes podia apontar o ref para o commit
+# exato. Contra escrita indevida quem defende e a permissao do repositorio.
+#
+# O que sai daqui e um SHA de 40 hexadecimais. Nao ha nome de fonte, caminho
+# nem conteudo: o ref diz "o commit X passou", e X ja e opaco.
 #
 # NUNCA APAGA REF. Aprovacao nao se retira, porque um commit que passou no CI
 # passou no CI. Se algo estiver errado com ele, o caminho e um commit novo.
@@ -170,19 +182,52 @@ jobs:
           set -euo pipefail
           REF="refs/ci-aprovado/$SHA"
 
-          if gh api "repos/$AQUI/git/$REF" --jq .object.sha >/dev/null 2>&1; then
-            echo "ja aprovado antes: $REF"
-            exit 0
+          REF_TAG="refs/tags/ci-aprovado-$SHA"
+
+          # A idempotencia confere as DUAS refs, e nao so a primeira.
+          #
+          # Um review de 21/08/2026 achou o caminho sem saida: se a segunda
+          # escrita falhasse por motivo transiente (rate limit secundario,
+          # timeout, 5xx) DEPOIS da primeira ter dado certo, o `set -e`
+          # abortava com o par pela metade. E a versao anterior desta checagem
+          # testava SO `refs/ci-aprovado/<sha>`, entao toda reexecucao
+          # encontrava a primeira ref, dizia "ja aprovado antes" e saia com
+          # `exit 0` sem nunca completar a que faltava.
+          #
+          # O commit ficava com deploy proibido para sempre, e o remedio que o
+          # proprio portao sugere ("rode o workflow de novo") era exatamente o
+          # que nao funcionava.
+          JA_REF=$(gh api "repos/$AQUI/git/$REF" --jq .object.sha 2>/dev/null || true)
+          JA_TAG=$(gh api "repos/$AQUI/git/$REF_TAG" --jq .object.sha 2>/dev/null || true)
+
+          if [ -n "$JA_REF" ] && [ -n "$JA_TAG" ]; then
+            if [ "$JA_REF" = "$JA_TAG" ]; then
+              echo "ja aprovado antes, par completo: $REF"
+              exit 0
+            fi
+            echo "::error::par de aprovacao DIVERGENTE para $SHA; nao reescrevo sozinho"
+            exit 1
           fi
 
-          OBJ=$(gh api -X POST "repos/$AQUI/git/tags" \
-                  -f tag="ci-aprovado-$SHA" \
-                  -f message="CI verde no commit $SHA do repositorio privado" \
-                  -f object="$OBJETO_LOCAL" \
-                  -f type=commit --jq .sha)
+          # Completar o par pela metade REUSA o objeto que ja existe, em vez de
+          # criar uma tag nova: duas tags para o mesmo commit fariam as refs
+          # apontarem para objetos diferentes, e o portao recusa par
+          # divergente. Ou seja, criar tag nova aqui trocaria um par
+          # incompleto (que a reserva ainda salva) por um par divergente (que
+          # nada salva).
+          OBJ="${JA_REF:-$JA_TAG}"
+          if [ -z "$OBJ" ]; then
+            OBJ=$(gh api -X POST "repos/$AQUI/git/tags" \
+                    -f tag="ci-aprovado-$SHA" \
+                    -f message="CI verde no commit $SHA do repositorio privado" \
+                    -f object="$OBJETO_LOCAL" \
+                    -f type=commit --jq .sha)
+          else
+            echo "::notice::par estava pela metade; completando com o objeto existente"
+          fi
 
           gh api -X POST "repos/$AQUI/git/refs" \
-            -f ref="$REF" -f sha="$OBJ" --jq .ref
+            -f ref="$REF" -f sha="$OBJ" --jq .ref || true
 
           # A MESMA aprovacao tambem vira ref de tag, apontando para o MESMO
           # objeto. Nao e redundancia: o portao exige as duas consistentes.
@@ -198,7 +243,7 @@ jobs:
           # podia apontar o ref para o commit exato. Contra escrita indevida
           # quem defende e a permissao, nunca o formato do ref.
           gh api -X POST "repos/$AQUI/git/refs" \
-            -f ref="refs/tags/ci-aprovado-$SHA" -f sha="$OBJ" --jq .ref
+            -f ref="refs/tags/ci-aprovado-$SHA" -f sha="$OBJ" --jq .ref || true
 
           echo "aprovado: $REF (com ref de tag pareada)"
 

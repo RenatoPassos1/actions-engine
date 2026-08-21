@@ -361,8 +361,10 @@ estrutural() {
     #     significa parar quatro projetos ao mesmo tempo, entao ela envelhece
     #     para sempre. E um workflow que a vaze entrega os outros tres junto.
     #
-    #     Cada projeto agora tem a sua, com
-    #     `restrict,no-agent-forwarding,no-port-forwarding,no-X11-forwarding`.
+    #     Cada projeto agora tem a sua, com a string exata
+    #     `restrict,no-agent-forwarding,no-port-forwarding,no-X11-forwarding,
+    #      no-user-rc,pty` (o `pty` reabilita o terminal que o `restrict`
+    #     desliga, e isso e escolha consciente, com custo).
     #     Provado nos dois sentidos naquele dia: com a chave nova o
     #     `ssh -R` responde "remote port forwarding failed", e com a antiga o
     #     tunel abria.

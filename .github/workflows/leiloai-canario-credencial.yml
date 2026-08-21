@@ -119,9 +119,24 @@ jobs:
           #    aprovação para o repositório público: enquanto ele era criado no
           #    privado, esta linha teria de passar, e uma credencial que julga
           #    um repositório não precisa poder escrever nele.
+          # SHA REAL, e nao 40 zeros.
+          #
+          # Um review de 21/08/2026 pegou o furo: com 40 zeros, o POST falha
+          # tanto por falta de `contents: write` quanto por "Object does not
+          # exist". Como `nao_deve_poder` so olha o codigo de saida, os dois
+          # casos ficam identicos, e se alguem ampliasse o escopo da credencial
+          # o canario continuaria verde. Era falso verde dentro do controle que
+          # existe justamente para pegar falso verde.
+          #
+          # Com um SHA que existe, a UNICA causa possivel de recusa e a
+          # permissao. Se um dia a credencial ganhar `contents: write`, o
+          # `nao_deve_poder` recebe sucesso, o canario fica vermelho, e o ref
+          # `refs/canario/permissao-ampliada` passa a existir no repositorio
+          # alvo como prova fisica de que a permissao mudou.
+          SHA_REAL=$(gh api "repos/$ALVO/branches/feat/landing" --jq .commit.sha)
           nao_deve_poder "criar ref no repositorio alvo (contents write)" \
             gh api -X POST "repos/$ALVO/git/refs" \
-              -f ref=refs/canario/nao-deve-existir -f sha=0000000000000000000000000000000000000000
+              -f ref=refs/canario/permissao-ampliada -f sha="$SHA_REAL"
 
           # 4. Disparar workflow no alvo.
           nao_deve_poder "disparar workflow no alvo (actions write)" \

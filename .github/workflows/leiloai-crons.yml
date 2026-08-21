@@ -98,7 +98,27 @@ jobs:
 
           # Grupos. O numero e opaco de proposito: nao diz o que faz nem
           # quantas fontes ha por familia.
-          g1='{"id":"J101"},{"id":"J103"},{"id":"J104"},{"id":"J105"},{"id":"J106"}'
+          # J106 SAIU DAQUI EM 21/08/2026, e o motivo e dono duplicado.
+          #
+          # Medido: o mesmo coletor era acionado por DOIS agendadores. Este
+          # grupo o disparava 1x por dia (cron das 11:00 UTC), e o cron da VPS
+          # dispara os 4 shards de 4, cada um a cada 30 minutos, cobrindo o
+          # conjunto inteiro 2x por hora.
+          #
+          # Nao era escrita dupla de dados diferentes: os dois caminhos chamam o
+          # MESMO worker, e o upsert dele absorve repeticao. Mas a policy de
+          # execucao proibe dois agendadores autoritativos, e proibe
+          # explicitamente manter VPS e Actions em paralelo "por redundancia":
+          # failover e troca de dono declarada, nao dois donos ao mesmo tempo.
+          #
+          # O plano autoritativo de agregadores e a VPS, por cobertura (4 shards
+          # contra nenhum) e por cadencia (96x mais frequente).
+          #
+          # Isto foi encontrado pelo validador `validar-execution-plane.mjs`,
+          # depois que um review mostrou que a comparacao por substring dele
+          # nunca disparava: os alvos sao `ingest-*` e os scripts sao `run-*`,
+          # entao nenhum continha o outro e a regra respondia zero para sempre.
+          g1='{"id":"J101"},{"id":"J103"},{"id":"J104"},{"id":"J105"}'
           g2='{"id":"J102"}'
           g3='{"id":"J110"}'
           g4='{"id":"J107"}'

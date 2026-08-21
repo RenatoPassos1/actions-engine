@@ -119,4 +119,20 @@ jobs:
         env:
           ORIGEM: github
           INTERVALO_S: "3"
-        run: bash scripts/ci/shadow-coletor.sh "${{ inputs.batch }}"
+        # `$BATCH` vindo de `env:`, e nao `${{ inputs.batch }}` cru.
+        #
+        # Hoje isto e higiene, nao correcao de furo: o passo anterior valida o
+        # lote contra allowlist e sai com `exit 1` se nao bater, entao esta
+        # linha nunca e alcancada com valor malformado. Mas a seguranca fica
+        # dependendo de a ordem dos passos continuar como esta, e ordem de
+        # passo e a coisa mais facil de mudar sem perceber.
+        #
+        # `type: choice` tambem nao protege sozinho: via API, todo input de
+        # `workflow_dispatch` chega como string livre.
+        env:
+          BATCH: ${{ inputs.batch }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$BATCH" | grep -qE '^(B00[1-6]|C0(0[7-9]|1[0-2]))$' \
+            || { echo "::error::lote invalido"; exit 1; }
+          bash scripts/ci/shadow-coletor.sh "$BATCH"

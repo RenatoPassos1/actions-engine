@@ -65,3 +65,22 @@ Thumbs.db
 
 # --- saida de build de OUTRO projeto, nao pertence a este repositorio
 vektor-news/
+
+# --- lacunas apontadas por review em 21/08/2026
+#
+# 1. Case-sensitivity: `credenciais*` exige tudo minusculo e `CREDENCIAIS*`
+#    exige tudo maiusculo. `Credenciais.md` nao casava com nenhum dos dois, e
+#    runner do GitHub usa filesystem case-sensitive.
+# 2. `.npmrc` e `.netrc` sao carregadores classicos de token e nao estavam
+#    cobertos por padrao nenhum.
+#
+# Vale lembrar o limite do mecanismo: `.gitignore` le NOME de arquivo, nunca
+# conteudo. Um `notes.md` com uma chave dentro passa por todos estes padroes.
+# Quem cobre conteudo e o secret scanning do GitHub, que e independente disto.
+[Cc]redenciais*
+[Cc]redencial*
+.npmrc
+.netrc
+*.jks
+*.keystore
+*.ovpn

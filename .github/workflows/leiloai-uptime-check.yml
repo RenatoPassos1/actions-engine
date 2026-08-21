@@ -58,13 +58,26 @@ jobs:
       - name: Abre issue se caiu
         if: steps.ping.outputs.ok != 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          # Tudo por `env:`, nada interpolado dentro do `script:`.
+          #
+          # `steps.ping.outputs.code` e o mais perigoso dos quatro: vem de um
+          # `curl` contra host externo, ou seja, quem responde escolhe o valor.
+          # Interpolado como texto dentro do JS, uma aspa simples na resposta
+          # fecharia a string e o resto viraria codigo rodando com o token do
+          # job. Apontado por review em 21/08/2026.
+          SLUG: ${{ matrix.target.slug }}
+          URL_ALVO: ${{ matrix.target.url }}
+          CODE: ${{ steps.ping.outputs.code }}
+          ESPERADO: ${{ matrix.target.espera }}
         with:
           script: |
             const dia = new Date().toISOString().slice(0, 10);
-            const slug = '${{ matrix.target.slug }}';
-            const url = '${{ matrix.target.url }}';
-            const code = '${{ steps.ping.outputs.code }}';
-            const esperado = '${{ matrix.target.espera }}';
+            const limpo = (v, re) => (re.test(String(v ?? '')) ? String(v) : '?');
+            const slug = limpo(process.env.SLUG, /^[A-Za-z0-9._-]{1,60}$/);
+            const url = limpo(process.env.URL_ALVO, /^https?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]{1,300}$/);
+            const code = limpo(process.env.CODE, /^[0-9]{3}$/);
+            const esperado = limpo(process.env.ESPERADO, /^[0-9]{3}$/);
             const titulo = `[incident] uptime ${slug} fora ${dia}`;
             const corpo = [
               `URL ${url} respondeu HTTP ${code} (esperado ${esperado}).`,

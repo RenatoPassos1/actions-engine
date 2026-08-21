@@ -21,11 +21,28 @@ jobs:
 
     steps:
       - name: Setup SSH key
+        # O secret entra por `env:` e sai por `printf`, nunca por
+        # um eco do secret interpolado direto no comando.
+        #
+        # Corrigido em 21/08/2026. Ecoar secret interpolado e o
+        # padrao numero 5 da lei que este repositorio segue, e a razao
+        # e concreta: a interpolacao acontece ANTES do shell existir,
+        # entao o valor vira parte do comando. Com `set -x` ligado em
+        # qualquer ponto, ou com um `echo` que falhe e imprima o
+        # comando, a chave privada inteira vai para o log de um
+        # repositorio PUBLICO.
+        #
+        # `printf` tambem preserva o conteudo melhor: `echo` corta em
+        # newline em alguns shells, e chave PEM e multilinha por
+        # definicao.
+        env:
+          CHAVE: ${{ secrets.FIDES_SSH_KEY }}
+          ALVO_HOST: ${{ secrets.FIDES_VM_HOST }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.FIDES_SSH_KEY }}" > ~/.ssh/deploy_key
+          printf '%s\n' "$CHAVE" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.FIDES_VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "$ALVO_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Pull, build and restart
         run: |
