@@ -197,8 +197,41 @@ jobs:
           # O commit ficava com deploy proibido para sempre, e o remedio que o
           # proprio portao sugere ("rode o workflow de novo") era exatamente o
           # que nao funcionava.
-          JA_REF=$(gh api "repos/$AQUI/git/$REF" --jq .object.sha 2>/dev/null || true)
-          JA_TAG=$(gh api "repos/$AQUI/git/$REF_TAG" --jq .object.sha 2>/dev/null || true)
+          # NAO CONFIAR NO STDOUT DA `gh api` QUANDO ELA FALHA.
+          #
+          # MEDIDO em 21/08/2026: com a ref ausente, a rota responde 404 e o
+          # `gh` imprime o CORPO DO ERRO no stdout, nao no stderr. Com
+          # `2>/dev/null || true`, as duas variaveis recebiam o MESMO JSON de
+          # "Not Found": nao vazias e IGUAIS, que e exatamente a condicao de
+          # "par completo" logo abaixo. O workflow saia com sucesso sem criar
+          # ref nenhuma, e o portao de deploy recusava todo commit novo.
+          #
+          # Entrou as 11:16 UTC e nenhum deploy passou depois disso. A ultima
+          # aprovacao de verdade foi as 10:52 UTC, e o commit publicado em
+          # producao continuou o de 04:25 UTC.
+          #
+          # A ironia importa para quem for mexer aqui: este trecho nasceu num
+          # commit chamado "tres deles eram falso verde meu", e criou um falso
+          # verde novo, no proprio check que existia para impedir par pela
+          # metade.
+          #
+          # Duas travas, porque uma so ja falhou:
+          #   1. a rota certa e `git/ref/<sem o refs/>`, no SINGULAR; a plural
+          #      `git/refs/<prefixo>` e "listar refs do namespace" e responde
+          #      404 quando o namespace nao existe;
+          #   2. o valor so vale se tiver FORMA de sha, 40 digitos hex. Assim,
+          #      qualquer corpo de erro que escape do item 1 e descartado aqui.
+          sha_do_ref() {
+            saida=$(gh api "repos/$AQUI/git/ref/${1#refs/}" --jq .object.sha 2>/dev/null) || saida=""
+            case "$saida" in
+              [0-9a-f]*) [ ${#saida} -eq 40 ] || saida="" ;;
+              *) saida="" ;;
+            esac
+            printf '%s' "$saida"
+          }
+          JA_REF=$(sha_do_ref "$REF")
+          JA_TAG=$(sha_do_ref "$REF_TAG")
+          echo "idempotencia: ref=${JA_REF:-ausente} tag=${JA_TAG:-ausente}"
 
           if [ -n "$JA_REF" ] && [ -n "$JA_TAG" ]; then
             if [ "$JA_REF" = "$JA_TAG" ]; then
