@@ -92,7 +92,7 @@ jobs:
 
       - name: Abre issue se P1 > 0
         if: steps.chamada.outputs.p1 != '0' && steps.chamada.outputs.p1 != '-1'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const dia = new Date().toISOString().slice(0, 10);
@@ -136,7 +136,7 @@ jobs:
 
       - name: Abre issue se endpoint caiu (http_code != 200)
         if: steps.chamada.outputs.http_code != '200'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const dia = new Date().toISOString().slice(0, 10);

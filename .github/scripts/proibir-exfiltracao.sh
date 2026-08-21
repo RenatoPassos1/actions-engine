@@ -147,7 +147,7 @@ RE_ARTEFATO='^[[:space:]]*path:[[:space:]]*["'"'"']?[^"'"'"'$]*(\.env|env\.txt|e
 #    A forma segura e mandar por stdin ou por variavel de ambiente do ssh.
 #
 #    O `ssh` tem de ser COMANDO, e nao pedaco de nome. Sem o delimitador da
-#    frente, a linha correta `SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}`
+#    frente, a linha correta `SSH_KEY_B64: ${{ secrets.<PROJETO>_ORACLE_SSH_KEY }}`
 #    (que e exatamente a forma segura, passando por `env:` do passo) seria
 #    acusada, e a trava estaria ensinando o oposto do que quer.
 # --------------------------------------------------------------------------
@@ -349,6 +349,27 @@ estrutural() {
         acusar "$f" "$l" "artefato ou cache num workflow que faz checkout de repositorio privado: codigo privado nao pode atravessar armazenamento de repositorio publico" "$(sed -n "${l}p" "$f" | cut -c1-120)"
       done
     fi
+
+    # 15. Volta da chave SSH compartilhada de producao. Medido em 21/08/2026:
+    #     `ORACLE_SSH_KEY` era UMA chave, sem restricao nenhuma no
+    #     `authorized_keys`, usada por 21 workflows de 4 projetos diferentes,
+    #     guardada nos secrets deste repositorio, que e publico. Ela dava
+    #     `ubuntu` com sudo e grupo docker na VPS de producao.
+    #
+    #     O problema nao e uma chave existir: e a mesma chave servir todo
+    #     mundo. Chave compartilhada nao se rotaciona, porque rotacionar
+    #     significa parar quatro projetos ao mesmo tempo, entao ela envelhece
+    #     para sempre. E um workflow que a vaze entrega os outros tres junto.
+    #
+    #     Cada projeto agora tem a sua, com
+    #     `restrict,no-agent-forwarding,no-port-forwarding,no-X11-forwarding`.
+    #     Provado nos dois sentidos naquele dia: com a chave nova o
+    #     `ssh -R` responde "remote port forwarding failed", e com a antiga o
+    #     tunel abria.
+    linhas=$(grep -nE 'secrets\.ORACLE_SSH_KEY\b' "$f" | grep -vE 'for nome in' | cut -d: -f1)
+    for l in $linhas; do
+      acusar "$f" "$l" "chave SSH compartilhada de producao: use a chave dedicada do projeto (<PROJETO>_ORACLE_SSH_KEY). Uma chave para quatro projetos nunca e rotacionada, e quem a vazar entrega os outros tres" "$(sed -n "${l}p" "$f" | cut -c1-120)"
+    done
 
     # 13. Workflow do LeiloAI usando o PAT multiprojeto. Medido em 20/08/2026:
     #     `REPO_PAT` alcanca 13 repositorios privados, e existe

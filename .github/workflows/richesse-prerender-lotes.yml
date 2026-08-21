@@ -35,7 +35,7 @@ jobs:
 
       - name: Setup SSH
         env:
-          SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
+          SSH_KEY_B64: ${{ secrets.RICHESSE_ORACLE_SSH_KEY }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
           mkdir -p ~/.ssh

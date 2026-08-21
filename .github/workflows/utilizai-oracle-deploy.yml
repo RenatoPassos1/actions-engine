@@ -4,7 +4,9 @@
 # Se SHA mudou: ssh para Oracle, git pull, docker build, docker restart.
 #
 # Pre-requisitos (secrets em actions-engine):
-#   ORACLE_SSH_KEY        - chave privada SSH (openclaw_do) base64 encoded
+#   UTILIZAI_ORACLE_SSH_KEY - chave SSH dedicada a ESTE projeto, criada em
+#                             21/08/2026 (antes era uma chave unica para os
+#                             quatro projetos que chegam nesta VPS).
 #   ORACLE_HOST           - 137.131.143.236
 #   ORACLE_USER           - ubuntu
 #   REPO_PAT              - PAT com read:repo no UtilizAi (privado)
@@ -69,7 +71,7 @@ jobs:
       - name: Setup SSH
         if: steps.compare.outputs.skip == 'false'
         env:
-          SSH_KEY_B64: ${{ secrets.ORACLE_SSH_KEY }}
+          SSH_KEY_B64: ${{ secrets.UTILIZAI_ORACLE_SSH_KEY }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
           mkdir -p ~/.ssh
