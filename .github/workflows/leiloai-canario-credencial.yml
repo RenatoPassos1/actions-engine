@@ -95,9 +95,23 @@ jobs:
           nao_deve_poder "alcancar outro repositorio privado (tudo-venda)" \
             gh api "repos/RenatoPassos1/tudo-venda" --jq .id
 
-          # 2. Admin. Colaboradores e secrets são leitura de administração.
-          nao_deve_poder "listar colaboradores do alvo (admin)" \
-            gh api "repos/$ALVO/collaborators" --jq length
+          # 2. Admin.
+          #
+          # NAO usar `repos/X/collaborators` aqui. Rodei com ele em 21/08/2026 e
+          # o canário reprovou: listar colaboradores PASSA, e passa porque o
+          # GitHub o classifica em `Metadata`, que é obrigatório e não se
+          # desliga ("Search repositories, list collaborators, and access
+          # repository metadata"). O teste é que estava errado, não a
+          # credencial.
+          #
+          # A lição é maior que o caso: escolher endpoint pelo que ele parece,
+          # em vez de pelo escopo que o GitHub cobra dele, produz canário que
+          # acusa credencial correta. E trava que acusa à toa é a que ensina a
+          # ignorar trava.
+          #
+          # Os dois abaixo cobram `Administration` de verdade.
+          nao_deve_poder "listar chaves de deploy do alvo (administration)" \
+            gh api "repos/$ALVO/keys" --jq length
           nao_deve_poder "listar secrets do alvo (admin)" \
             gh api "repos/$ALVO/actions/secrets" --jq .total_count
 
