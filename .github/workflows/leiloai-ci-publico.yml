@@ -215,7 +215,17 @@ jobs:
         with:
           repository: RenatoPassos1/leilao-watch
           ref: ${{ needs.resolver.outputs.sha }}
-          token: ${{ secrets.LEILOAI_REPO_PAT }}
+          # Chave de deploy SOMENTE LEITURA, criada em 21/08/2026 e presa a
+          # ESTE repositorio (id 160866978, `read_only: true`). Ela substitui
+          # aqui um PAT que, medido no mesmo dia, alcancava 13 dos 15
+          # repositorios do dono COM PERMISSAO DE ADMIN. Este e o job que
+          # executa 15 estagios de codigo privado logo depois do checkout,
+          # entao e o pior lugar do sistema para uma credencial ampla.
+          #
+          # Chave de deploy tambem nao fala com a API do GitHub: mesmo
+          # vazando, ela nao publica status, nao abre issue, nao le outro
+          # repositorio. So clona este.
+          ssh-key: ${{ secrets.LEILOAI_CHECKOUT_KEY }}
           persist-credentials: false
           # 2, e o numero tem motivo dos dois lados.
           #
@@ -247,6 +257,22 @@ jobs:
           if grep -qiE '(x-access-token|ghp_|github_pat_|Authorization)' .git/config 2>/dev/null; then
             echo "FAIL marca de token no config"; falhas=$((falhas+1))
           fi
+          # A partir de 21/08/2026 o checkout usa chave SSH, e a marca que
+          # sobraria e outra: `core.sshCommand` apontando para o arquivo de
+          # chave que a action escreve. `persist-credentials: false` deve
+          # remover os dois.
+          if git config --local --get core.sshCommand >/dev/null 2>&1; then
+            echo "FAIL core.sshCommand persistiu"; falhas=$((falhas+1))
+          fi
+          # Procurar por `~/.ssh/*` daria falso positivo, porque a action
+          # escreve `known_hosts` ali e isso nao e credencial. O que nao pode
+          # sobrar e MATERIAL DE CHAVE, entao a busca e pelo cabecalho de
+          # chave privada, em ~/.ssh e no temporario do runner, que e onde a
+          # action de fato grava.
+          sobrou=$(grep -rl "PRIVATE KEY" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" 2>/dev/null | wc -l)
+          if [ "$sobrou" -ne 0 ]; then
+            echo "FAIL sobrou material de chave privada em disco"; falhas=$((falhas+1))
+          fi
           [ "$falhas" -eq 0 ] && echo "CREDENTIAL_PERSISTED false" || exit 1
 
       # Secao 45: teste automatico que falha se variavel sensivel conhecida
@@ -255,7 +281,7 @@ jobs:
         run: |
           set -uo pipefail
           presentes=0
-          for nome in REPO_PAT LEILOAI_REPO_PAT ORACLE_SSH_KEY ORACLE_HOST ORACLE_USER \
+          for nome in REPO_PAT LEILOAI_REPO_PAT LEILOAI_CHECKOUT_KEY ORACLE_SSH_KEY ORACLE_HOST ORACLE_USER \
                       SUPABASE_SERVICE_ROLE_KEY LEILOAI_SUPABASE_SR LEILOAI_SUPABASE_DB_URL \
                       DATABASE_URL STRIPE_SECRET_KEY BREVO_API_KEY CRON_SECRET \
                       LEILOAI_DISPARO_SECRET GH_TOKEN GITHUB_TOKEN; do
