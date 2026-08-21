@@ -104,6 +104,11 @@ jobs:
           g4='{"id":"J107"}'
           g5='{"id":"J108"},{"id":"J114"}'
           g6='{"id":"J109"}'
+          # G7 estava DESLIGADO desde 06/05/2026 (`if: false`, com a nota
+          # "worker retorna 404"). Religado em 21/08/2026 DEPOIS de medir, a
+          # partir da VPS: `/health` do alvo responde 200. Sem a medicao,
+          # religar deixaria o agendador vermelho a cada 12 h e o vigia
+          # vermelho a cada 30 min, que e alarme que se aprende a ignorar.
           g7='{"id":"J111"}'
           g8='{"id":"J112"}'
           # G9 e dividido em 27 partes. O indice nao revela para que serve.
@@ -193,14 +198,33 @@ jobs:
           fi
 
           # Ate 3 tentativas. `-K -` mantem o token fora da linha de comando.
+          # 660 e nao 600: o maior teto do lado servidor E 600 s. Com
+          # `--max-time 600` o curl desistiria SEMPRE primeiro, o caminho
+          # `em_execucao` nunca seria alcancado, e a retentativa chegaria fora
+          # da janela de idempotencia disparando o mesmo coletor uma segunda
+          # vez, em paralelo com o primeiro, contra host de terceiro.
           rc=1
           for tentativa in 1 2 3; do
             HTTP=$(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | \
               curl -sS -o /tmp/resp.json -w '%{http_code}' -K - \
                 -X POST -H 'content-type: application/json' \
-                --max-time 600 -d "$CORPO" "$ALVO") || HTTP=000
+                --max-time 660 -d "$CORPO" "$ALVO") || HTTP=000
+            ESTADO_PARCIAL=$(jq -r '.estado // ""' /tmp/resp.json 2>/dev/null || echo "")
             case "$HTTP" in
-              2*) rc=0; break ;;
+              # `duplicado` significa "outra chamada recente ja marcou esta
+              # tarefa", e NAO "a tarefa rodou". Aceitar como sucesso e o que
+              # transformava o mecanismo de retry em conversor de falha em
+              # verde: a tentativa 1 recebia 502, a 2 encontrava a marca e
+              # recebia 200, o `case 2*` zerava o codigo de retorno e o job
+              # terminava verde sem nada ter sido disparado.
+              2*)
+                if [ "$ESTADO_PARCIAL" = "duplicado" ]; then
+                  echo "tentativa $tentativa: resposta duplicado, nao conclusivo"
+                  sleep 20
+                else
+                  rc=0; break
+                fi
+                ;;
               429) echo "tentativa $tentativa: teto de taxa"; sleep 30 ;;
               *)   echo "tentativa $tentativa: http=$HTTP"; sleep 15 ;;
             esac
