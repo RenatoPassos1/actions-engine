@@ -15,7 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: "URLs separadas por espaco"
+        # ATENCAO: o valor digitado aqui vai para o payload do dispatch, para a
+        # aba Actions e para o log, e este repositorio e PUBLICO. Para sondar
+        # candidata que nao pode ser publicada, use `scripts/sondar-fonte.sh`
+        # na VPS, que so faz GET e HEAD e nao publica nada.
+        description: "URLs separadas por espaco (o valor fica PUBLICO)"
         type: string
         required: true
       rolar:
@@ -117,7 +121,8 @@ jobs:
                 // FORMAS de caminho, com numero trocado por N. Uma lista de
                 // formas diz ONDE estao os lotes; a primeira URL sozinha so diz
                 // qual link veio primeiro no DOM, que costuma ser menu, e foi
-                // assim que a sonda insistiu em /lotes/favoritos no Sodre.
+                // assim que a sonda insistiu numa rota de favoritos de uma
+                // das fontes.
                 const formas = {};
                 for (const h of unicas) {
                   try {
