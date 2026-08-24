@@ -103,8 +103,21 @@ on:
 # o PAT dedicado, e quem so computa nao fala com ninguem.
 permissions: {}
 
+# O GRUPO E POR SHA, E NAO GLOBAL.
+#
+# MEDIDO EM 24/08/2026: com `group: leiloai-ci-publico` para todo mundo, duas
+# sessoes disparando CI ao mesmo tempo se cancelavam. `cancel-in-progress:
+# false` protege quem JA esta rodando, mas o GitHub cancela os PENDENTES,
+# menos o ultimo. Resultado: o disparo de uma sessao morria 8 segundos depois
+# de entrar na fila, o commit status ficava `pending` para sempre, e a sessao
+# ficava 37 minutos achando que o CI estava lento.
+#
+# Com o SHA no grupo, disparos para commits DIFERENTES nao se tocam: eles
+# enfileiram, porque o runner ja serializa sozinho. Disparos para o MESMO
+# commit continuam colapsando em um, que e o comportamento desejado (nao
+# adianta rodar duas vezes o mesmo codigo).
 concurrency:
-  group: leiloai-ci-publico
+  group: leiloai-ci-publico-${{ inputs.sha || github.sha }}
   cancel-in-progress: false
 
 env:
