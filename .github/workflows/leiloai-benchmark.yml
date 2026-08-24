@@ -1,0 +1,333 @@
+# LeilôAI: Benchmark Orchestrator — dispara suites de benchmark de IA no
+# runner publico, sob demanda (W3, briefing secao 109B).
+#
+# ============================================================================
+# POR QUE ISTO EXISTE E O QUE ELE NAO E
+# ============================================================================
+#
+# Nao e o CI de validacao (leiloai-ci-publico.yml): aquele roda lint/typecheck/
+# build a cada commit. Este roda SUITES DE BENCHMARK DE IA, sob demanda
+# (workflow_dispatch), contra uma suite e um SHA explicitos.
+#
+# As suites de hoje usam so dado sintetico. A secao 109B.10 proibe rotear
+# qualquer suite MODEL_SECRET_REQUIRED para este plane publico:
+# `scripts/benchmarkctl.mjs run-local` confere isso e recusa ANTES de tentar
+# rodar nada, nunca finge sucesso. Se uma suite exigir chave de provider de
+# IA, ela fica BLOQUEADA aqui ate existir um plane com broker de segredo
+# (109B.7/109B.8) — nao existe hoje, de proposito.
+#
+# ============================================================================
+# MESMO PADRAO DE SEGURANCA DO leiloai-ci-publico.yml, PELOS MESMOS MOTIVOS
+# ============================================================================
+#
+# Checkout manual do repositorio privado por chave de deploy SOMENTE LEITURA,
+# destruida com `shred` antes do primeiro estagio de codigo; o job que executa
+# codigo do repositorio privado nao recebe NENHUM secret no ambiente; quem
+# publica o resultado e OUTRO job, em VM nova, sem checkout. O raciocinio
+# linha a linha (por que clone manual e nao a action, por que a varredura de
+# material de chave tem controle positivo) esta em leiloai-ci-publico.yml,
+# neste mesmo repositorio: nao duplicado aqui, so reaplicado.
+#
+# ============================================================================
+# O RESULTADO VIRA REF PUBLICO OPACO, MESMO PADRAO DE leiloai-ci-aprovado.yml
+# ============================================================================
+#
+# O resultado de um benchmark (pass/fail/blocked, duracao, custo) nao e
+# booleano como "CI verde", entao nao cabe em commit status. A tecnica e a
+# mesma usada la: um objeto neste repositorio (aqui um BLOB, nao uma tag
+# anotada, porque nao ha commit externo para o ref apontar) e um ref proprio,
+# `refs/leiloai-benchmark-results/<suite>-<sha>`. Suite e sempre um id
+# generico (ex: orchestrator-smoke) — nunca nome de fonte de coleta (LEI No 2
+# do repositorio privado). SHA e opaco, 40 hex, sem significado fora de la.
+# Quem le nao precisa de credencial nenhuma: o repositorio e publico.
+
+name: "LeilôAI: Benchmark Orchestrator"
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "id da suite (scripts/benchmark-suites.json no repo privado)"
+        required: true
+        type: string
+      sha:
+        description: "SHA de 40 hex do repo privado (vazio = HEAD de feat/landing)"
+        required: false
+        type: string
+      dataset_version:
+        description: "versao do dataset (vazio = a declarada no manifest da suite)"
+        required: false
+        type: string
+
+# Nenhum job precisa do GITHUB_TOKEN por padrao: quem fala com o repositorio
+# privado usa o PAT dedicado (resolver), quem so computa nao fala com
+# ninguem (compute), e quem publica ref neste repositorio pede write so ali
+# (publicar).
+permissions: {}
+
+env:
+  REPO_PRIVADO: RenatoPassos1/leilao-watch
+  BRANCH: feat/landing
+
+# Grupo por suite+sha: disparos para suite/commit DIFERENTES nao se
+# cancelam (mesma licao medida em leiloai-ci-publico.yml sobre `cancel-in-
+# progress` global matando disparo pendente de outra sessao).
+concurrency:
+  group: leiloai-benchmark-${{ inputs.suite }}-${{ inputs.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  # ==========================================================================
+  # JOB 0 — RESOLVER: decide qual SHA validar e confere a suite. Codigo fixo
+  # deste arquivo, com o PAT; nao faz checkout.
+  # ==========================================================================
+  resolver:
+    name: resolver alvo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.alvo.outputs.sha }}
+      suite: ${{ steps.alvo.outputs.suite }}
+    steps:
+      - name: Resolver SHA e validar a suite
+        id: alvo
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
+          ENTRADA_SHA: ${{ inputs.sha }}
+          ENTRADA_SUITE: ${{ inputs.suite }}
+        run: |
+          set -euo pipefail
+
+          # id de suite: allowlist estrita. Isto entra em nome de REF e em
+          # argv do harness; texto livre aqui nunca e seguro.
+          SUITE="$ENTRADA_SUITE"
+          if ! printf '%s' "$SUITE" | grep -qE '^[a-z0-9][a-z0-9-]*$'; then
+            echo "::error::suite invalida (so [a-z0-9-]): $SUITE"
+            exit 1
+          fi
+          echo "suite=$SUITE" >> "$GITHUB_OUTPUT"
+
+          SHA="${ENTRADA_SHA:-}"
+          if [ -n "$SHA" ]; then
+            if ! printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
+              echo "::error::sha precisa ter 40 hex minusculos"
+              exit 1
+            fi
+            # Existe mesmo no repositorio privado? Input nao vira checkout
+            # sem passar por aqui.
+            gh api "repos/$REPO_PRIVADO/commits/$SHA" --jq .sha > /dev/null
+          else
+            SHA=$(gh api "repos/$REPO_PRIVADO/branches/$BRANCH" --jq .commit.sha)
+          fi
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha resolvido invalido"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "vou rodar suite=$SUITE em ${SHA:0:8}"
+
+  # ==========================================================================
+  # JOB A — COMPUTE: o unico lugar onde codigo do repositorio privado roda.
+  # ARM porque a VPS de producao e ARM (M4): medir num runner diferente da
+  # producao seria declarar equivalencia que ninguem mediu.
+  # ==========================================================================
+  compute:
+    name: compute (ARM, sem segredo)
+    needs: resolver
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions: {}
+    outputs:
+      resultado_b64: ${{ steps.rodar.outputs.resultado_b64 }}
+    steps:
+      # Clone manual, chave SOMENTE LEITURA presa ao repositorio privado, so
+      # existe entre o mktemp e o shred. Mesmo desenho de leiloai-ci-
+      # publico.yml; ver aquele arquivo para o raciocinio completo.
+      - name: Checkout do repositorio privado (unico step com credencial)
+        env:
+          CHAVE: ${{ secrets.LEILOAI_CHECKOUT_KEY }}
+          SHA: ${{ needs.resolver.outputs.sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
+          ARQ_CHAVE="$(mktemp)"; chmod 600 "$ARQ_CHAVE"
+          KH="$(mktemp)"
+          trap 'shred -u "$ARQ_CHAVE" 2>/dev/null || rm -f "$ARQ_CHAVE"; rm -f "$KH"' EXIT
+          printf '%s' "$CHAVE" > "$ARQ_CHAVE"
+          printf '\n' >> "$ARQ_CHAVE"
+          curl -sS --max-time 20 https://api.github.com/meta > /tmp/gh-meta.json
+          jq -r '.ssh_keys[] | "github.com " + .' /tmp/gh-meta.json > "$KH"
+          rm -f /tmp/gh-meta.json
+          [ -s "$KH" ] || { echo "::error::nao obtive as chaves de host do github"; exit 1; }
+          export GIT_SSH_COMMAND="ssh -i $ARQ_CHAVE -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=yes -o BatchMode=yes"
+          git init -q .
+          git remote add origin "git@github.com:$REPO_PRIVADO.git"
+          # Profundidade 2 pelo mesmo motivo do CI: com 0 o git lista toda
+          # branch do privado no log (vazamento de nome em log publico); com
+          # 1 nao sobra HEAD~1 para nada que precise comparar contra o pai.
+          git fetch -q --depth 2 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          shred -u "$ARQ_CHAVE" 2>/dev/null || rm -f "$ARQ_CHAVE"
+          rm -f "$KH"
+          trap - EXIT
+          unset GIT_SSH_COMMAND
+          echo "CHECKOUT ok"
+
+      # Conferencia sem imprimir conteudo: so PASS/FAIL.
+      - name: Credencial nao persistiu
+        run: |
+          set -uo pipefail
+          falhas=0
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1; then
+            echo "FAIL extraheader presente"; falhas=$((falhas+1))
+          fi
+          if git config --local --get-regexp '^credential\.' >/dev/null 2>&1; then
+            echo "FAIL credential helper presente"; falhas=$((falhas+1))
+          fi
+          if git remote -v 2>/dev/null | grep -qE '://[^/@[:space:]]+@'; then
+            echo "FAIL remote com credencial embutida"; falhas=$((falhas+1))
+          fi
+          if grep -qiE '(x-access-token|ghp_|github_pat_|Authorization)' .git/config 2>/dev/null; then
+            echo "FAIL marca de token no config"; falhas=$((falhas+1))
+          fi
+          if git config --local --get core.sshCommand >/dev/null 2>&1; then
+            echo "FAIL core.sshCommand persistiu"; falhas=$((falhas+1))
+          fi
+          if [ -n "${GIT_SSH_COMMAND:-}" ]; then
+            echo "FAIL GIT_SSH_COMMAND ainda exportado"; falhas=$((falhas+1))
+          fi
+          # Busca por material de CHAVE PRIVADA, com controle positivo antes
+          # da busca de verdade (um scanner que responde zero quando quebra
+          # e pior do que nao ter scanner: ver leiloai-ci-publico.yml).
+          MARCA=$(printf 'PRI%sKEY' 'VATE ')
+          CTRL="${RUNNER_TEMP:-/tmp}/controle-de-varredura-$$"
+          printf -- '-----BEGIN OPENSSH %s-----\n' "$MARCA" > "$CTRL"
+          achou_ctrl=$( { grep -rl "$MARCA" "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true; } | grep -c "controle-de-varredura-$$" || true)
+          rm -f "$CTRL"
+          if [ "$achou_ctrl" -eq 0 ]; then
+            echo "::error::a varredura de material de chave nao acusa nem o controle positivo"
+            exit 2
+          fi
+          sobrou=$( { grep -rl "$MARCA" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | wc -l)
+          if [ "$sobrou" -ne 0 ]; then
+            echo "FAIL sobrou material de chave privada em disco"
+            { grep -rl "$MARCA" "$HOME/.ssh" "${RUNNER_TEMP:-/tmp}" /tmp 2>/dev/null || true; } | sed 's/^/  achado em: /'
+            falhas=$((falhas+1))
+          fi
+          [ "$falhas" -eq 0 ] && echo "CREDENTIAL_PERSISTED false" || exit 1
+
+      # Secao 45 (do CI): teste automatico que falha se variavel sensivel
+      # conhecida estiver presente no compute, incluindo chave de provider de
+      # IA (o motivo deste job existir: nenhuma delas pode estar aqui).
+      - name: Nenhum segredo neste job (nem de infra, nem de provider de IA)
+        run: |
+          set -uo pipefail
+          presentes=0
+          for nome in REPO_PAT LEILOAI_REPO_PAT LEILOAI_STATUS_PAT LEILOAI_CHECKOUT_KEY ORACLE_SSH_KEY ORACLE_HOST ORACLE_USER \
+                      SUPABASE_SERVICE_ROLE_KEY LEILOAI_SUPABASE_SR LEILOAI_SUPABASE_DB_URL \
+                      DATABASE_URL STRIPE_SECRET_KEY BREVO_API_KEY CRON_SECRET LEILOAI_DISPARO_SECRET \
+                      DEEPSEEK_API_KEY OPENAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY GH_TOKEN GITHUB_TOKEN; do
+            if [ -n "${!nome:-}" ]; then
+              echo "FAIL categoria presente: $nome"
+              presentes=$((presentes+1))
+            fi
+          done
+          [ "$presentes" -eq 0 ] && echo "COMPUTE_SECRETS 0" || exit 1
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.1.0
+        with:
+          node-version: "22"
+
+      # run-local decide sozinho se a suite pode rodar neste plane (routing
+      # engine, 109B.10): se exigir segredo que este plane nao tem, recusa e
+      # escreve status=blocked, nunca finge sucesso. O resultado (pass, fail
+      # OU blocked) sempre e escrito em --out ANTES do exit code refletir o
+      # veredito, entao o step seguinte publica de qualquer forma.
+      - name: Rodar a suite (run-local)
+        id: rodar
+        run: |
+          set +e
+          node scripts/benchmarkctl.mjs run-local \
+            --suite "${{ needs.resolver.outputs.suite }}" \
+            --sha "${{ needs.resolver.outputs.sha }}" \
+            --plane github_actions_public \
+            --dataset-version "${{ inputs.dataset_version }}" \
+            --out /tmp/resultado.json
+          CODIGO=$?
+          set -e
+          [ -s /tmp/resultado.json ] || { echo "::error::run-local nao escreveu /tmp/resultado.json"; exit 1; }
+          echo "resultado_b64=$(base64 -w0 /tmp/resultado.json)" >> "$GITHUB_OUTPUT"
+          # 0=pass, 1=fail, 2=blocked (convencao do benchmarkctl). Qualquer
+          # valor != 0 marca este step (e o job) como falho de proposito:
+          # bloqueado nao e verde, e o job B publica o resultado de qualquer
+          # jeito porque roda com `if: always()`.
+          exit "$CODIGO"
+
+  # ==========================================================================
+  # JOB B — PUBLICAR: publica o resultado como ref publico opaco NESTE
+  # repositorio (mesmo padrao de leiloai-ci-aprovado.yml). VM nova, sem
+  # checkout, sem uma linha de codigo vinda do repositorio privado.
+  # ==========================================================================
+  publicar:
+    name: publicar resultado (ref opaco)
+    needs: [resolver, compute]
+    if: always() && needs.compute.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # write so aqui, so para criar ref NESTE repositorio publico. Nao
+    # alcanca o repositorio privado (falado pelo PAT no job resolver).
+    permissions:
+      contents: write
+    steps:
+      - name: Criar ou atualizar o ref de resultado
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AQUI: ${{ github.repository }}
+          SUITE: ${{ needs.resolver.outputs.suite }}
+          SHA: ${{ needs.resolver.outputs.sha }}
+          RESULTADO_B64: ${{ needs.compute.outputs.resultado_b64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
+          printf '%s' "$SUITE" | grep -qE '^[a-z0-9][a-z0-9-]*$' || { echo "::error::suite invalida"; exit 1; }
+
+          if [ -z "${RESULTADO_B64:-}" ]; then
+            echo "::notice::compute nao produziu resultado (job cancelado ou falhou antes do step 'Rodar a suite'); nada a publicar"
+            exit 0
+          fi
+
+          REF="leiloai-benchmark-results/${SUITE}-${SHA}"
+
+          # Blob primeiro: o ref so pode apontar para um objeto que ja
+          # existe no repositorio.
+          BLOB=$(gh api -X POST "repos/$AQUI/git/blobs" -f content="$RESULTADO_B64" -f encoding=base64 --jq .sha)
+          printf '%s' "$BLOB" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::blob invalido criado"; exit 1; }
+
+          # Rota de LEITURA e a SINGULAR (git/ref/<nome>): a plural
+          # (git/refs/<prefixo>) lista namespace e responde 404 quando ele
+          # nao existe, o que pareceria "sem resultado" com o ref presente.
+          # E nao confiar no stdout de `gh api` quando ela falha: com 404 o
+          # corpo do erro vai para o stdout, nao para o stderr (mesma
+          # licao paga em leiloai-ci-aprovado.yml).
+          sha_do_ref() {
+            saida=$(gh api "repos/$AQUI/git/ref/$1" --jq .object.sha 2>/dev/null) || saida=""
+            case "$saida" in
+              [0-9a-f]*) [ ${#saida} -eq 40 ] || saida="" ;;
+              *) saida="" ;;
+            esac
+            printf '%s' "$saida"
+          }
+
+          if [ -n "$(sha_do_ref "$REF")" ]; then
+            gh api -X PATCH "repos/$AQUI/git/refs/$REF" -f sha="$BLOB" -F force=true --jq .ref
+            echo "atualizado: refs/$REF -> $BLOB"
+          else
+            gh api -X POST "repos/$AQUI/git/refs" -f ref="refs/$REF" -f sha="$BLOB" --jq .ref
+            echo "criado: refs/$REF -> $BLOB"
+          fi
+
+          {
+            echo "suite=$SUITE"
+            echo "private_sha=$SHA"
+            echo "ref=refs/$REF"
+            echo "actions_engine_run_id=${{ github.run_id }}"
+            echo "runner_arch=arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
