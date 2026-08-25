@@ -1,0 +1,397 @@
+# LeilôAI. O coordenador da fila, rodando na NUVEM.
+#
+# ============================================================================
+# POR QUE ISTO EXISTE
+# ============================================================================
+#
+# A fila de integracao do LeiloAI existia e ninguem a puxava. Medido em
+# 24/08/2026 no log de eventos do repositorio privado: 347 eventos, 57
+# `QUEUE_ENTERED` e exatamente 3 `INTEGRATION_STARTED`, cada um seguido de
+# `REBASE_REQUIRED` dois segundos depois. Zero integracoes concluidas, nunca. A
+# entrada mais antiga estava parada havia dez horas.
+#
+# A causa nao era defeito de codigo: `agentctl integrate` delega a ordem para
+# "branch protection + required checks", e esse elo NAO EXISTE no `leilao-watch`
+# (privado em plano free, o GitHub responde 403, e o dono decidiu nao pagar).
+# Sem plataforma para impor a ordem, quem a impoe e quem mergeia.
+#
+# O primeiro conserto foi um laco na MAQUINA DO DONO. Funcionava e estava
+# errado: automacao de entrega nao pode depender de um PC especifico estar
+# ligado, com um usuario logado. Este workflow existe para tirar isso de la.
+#
+# ============================================================================
+# O PROBLEMA DIFICIL: A FILA NAO SE ENXERGA DAQUI
+# ============================================================================
+#
+# A fila do `agentctl` vive num SQLite dentro da maquina de quem roda o agente
+# (`.git/agent-coordination/state.sqlite3`, nunca commitado). Deste workflow ela
+# e invisivel, entao a ordem NAO pode vir dela.
+#
+# O substituto e o proprio veredito que o `finish` publica. Ele sai em dois
+# lugares, e os dois sao legiveis daqui:
+#
+#     refs/fila-coordenacao/<sha>          neste repositorio PUBLICO
+#     commit status `coordenacao/fila`     no repositorio privado
+#
+# O status carrega `created_at`, e esse carimbo E a hora do `finish`. Entao a
+# ordem da fila na nuvem e a ordem em que as entregas passaram pelo portao, que
+# e exatamente o criterio que a fila local usa (`queued_at`).
+#
+# Isto NAO reimplementa a fila: le o mesmo veredito que ela publica. Se o
+# `finish` nao rodou, nao ha status, e a entrega simplesmente nao existe para
+# este workflow, do mesmo jeito que nao existe para o portao do deploy.
+#
+# ============================================================================
+# SEGURANCA: ESTE REPOSITORIO E PUBLICO
+# ============================================================================
+#
+# Log e artefato daqui sao leitura aberta para qualquer pessoa, logada ou nao.
+# As regras que este arquivo segue, iguais as do `leiloai-ci-aprovado.yml`:
+#
+#   - `gh api`, nunca `curl -H "Authorization: ..."`. O `gh` le o token do
+#     ambiente e ele nao entra no argv, onde apareceria no `ps` do runner.
+#   - nada aqui imprime valor de credencial, nem transformado. Mascaramento so
+#     cobre a string exata do secret: `base64`, `cut` ou `rev` de um segredo
+#     sai em texto claro.
+#   - o passo que tem token NAO executa codigo vindo de fora deste arquivo.
+#
+# AUDITORIA DO QUE SAI NO LOG, linha por linha, porque "acho que nao vaza" nao
+# e medida. Este workflow imprime, e SO:
+#
+#     contagem de PRs abertos            um numero
+#     contagem de vereditos coletados    um numero
+#     numero do PR                       #364
+#     8 primeiros hex do SHA             0ef0313c
+#     carimbo de hora do `finish`        2026-08-24T23:47:02Z
+#
+# NAO imprime: titulo de PR, nome de branch, mensagem de commit, caminho de
+# arquivo, conteudo de diff, nome de fonte raspada, dado de usuario, nem valor
+# de credencial. As tres primeiras importam mais do que parecem: titulo e branch
+# nomeiam o que o commit toca ("fix(coleta): o campo do Superbid...",
+# `agent/coletor-superbid-...`), e isso e inteligencia sobre quais fontes o
+# LeiloAI raspa, num log que qualquer pessoa le sem estar logada.
+#
+# Por isso `gh pr list --json` escreve em ARQUIVO e nunca no stdout, o `jq` de
+# relatorio seleciona campo a campo, e o `gh pr merge` tem a saida descartada.
+#
+# ============================================================================
+# ESTADO ATUAL: NEM CONFERIR ELE CONSEGUE, E O MOTIVO ESTA MEDIDO
+# ============================================================================
+#
+# A primeira versao deste arquivo dizia que ele "nasce em modo conferir, e assim
+# a metade dificil fica exercitada antes de existir credencial de escrita".
+# ISSO ERA FALSO, e as duas primeiras rodadas reais mostraram por que:
+#
+#     GraphQL: Resource not accessible by personal access token
+#              (repository.pullRequests)
+#
+# `LEILOAI_STATUS_PAT` le COMMIT STATUS do `leilao-watch`, e so isso. Nao
+# alcanca pull request, nem para LER. Entao o `gh pr list` do primeiro passo
+# morria, e o job terminava vermelho sem dizer o que faltava. Nada era
+# exercitado: ele nao chegava a decidir coisa nenhuma.
+#
+# Duas permissoes diferentes, para dois momentos diferentes:
+#
+#   PARA CONFERIR (decidir a ordem e relatar, sem mergear)
+#     `Pull requests: Read` no PAT de leitura. Sem isso, este workflow avisa e
+#     sai verde sem fazer nada, em vez de falhar de dez em dez minutos com um
+#     erro opaco. Ele nao PODE agir errado nesse estado: sem a lista de PRs nao
+#     existe "proximo da fila".
+#
+#   PARA MERGEAR
+#     um SEGUNDO PAT, fine-grained, limitado a `RenatoPassos1/leilao-watch`,
+#     com `Contents: write` e `Pull requests: write` e NADA ALEM, guardado como
+#     secret `LEILOAI_MERGE_PAT`, e rodado com `modo=executar`.
+#
+# Os dois separados de proposito, e na direcao da decisao de 21/08/2026: a
+# credencial que JULGA um repositorio nao escreve nele. Quem le para relatar nao
+# precisa poder mergear, e quem mergeia so e usado no passo que mergeia.
+#
+# Enquanto o secret de escrita nao existir, `modo=executar` recusa e explica,
+# em vez de tentar e falhar no meio.
+
+name: "LeilôAI: coordenador da fila"
+
+on:
+  schedule:
+    # De 10 em 10 minutos. Mais curto que isso nao ajuda: o CI publico leva por
+    # volta de dez minutos, entao duas passagens seguidas veriam o mesmo estado.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "conferir (so decide e relata) ou executar (mergeia)"
+        required: false
+        default: "conferir"
+        type: choice
+        options: ["conferir", "executar"]
+  push:
+    paths:
+      - ".github/workflows/leiloai-coordenador-fila.yml"
+
+permissions:
+  # Este workflow nao escreve NADA neste repositorio. Quem cria ref de
+  # aprovacao e o `leiloai-ci-aprovado.yml`; quem mergeia e o repositorio
+  # privado, com credencial propria.
+  contents: read
+
+concurrency:
+  # Sem SHA no grupo, de proposito, e ao contrario do CI: duas passagens
+  # simultaneas do coordenador mergeariam fora de ordem, que e exatamente o
+  # defeito que ele existe para consertar. `cancel-in-progress: false` porque
+  # cancelar no meio de um merge deixaria estado pela metade.
+  group: leiloai-coordenador-fila
+  cancel-in-progress: false
+
+jobs:
+  coordenar:
+    name: puxar a fila
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ----------------------------------------------------------------------
+      # 1. QUEM ESTA NA FILA, E EM QUE ORDEM
+      # ----------------------------------------------------------------------
+      # Passo com token, e SO com codigo deste arquivo. Ele nao executa nada
+      # vindo do repositorio privado.
+      - name: Levantar os PRs abertos e o veredito de fila de cada um
+        id: levantar
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
+        run: |
+          set -euo pipefail
+          REPO=RenatoPassos1/leilao-watch
+          BASE=feat/landing
+          # 80 e folga sobre o medido: na primeira rodada com os cortes,
+          # 246 branches viraram 45 pontas com veredito, e o teto de 40
+          # cortava 5. 80 chamadas a cada 10 min sao 480/hora, contra um
+          # limite de 5.000, e o aviso continua saindo se um dia cortar.
+          TETO_COMPARACOES=80
+          mkdir -p fila
+
+          # ------------------------------------------------------------------
+          # DE ONDE SAI A LISTA DE CANDIDATOS, E POR QUE SAO DUAS FONTES
+          # ------------------------------------------------------------------
+          # MEDIDO em 25/08/2026, nas duas primeiras rodadas reais: o
+          # `LEILOAI_STATUS_PAT` NAO alcanca pull request, nem para LER.
+          #
+          #     GraphQL: Resource not accessible by personal access token
+          #              (repository.pullRequests)
+          #
+          # Mas ele alcanca BRANCH, COMMIT STATUS e CONTEUDO, e isso nao e
+          # suposicao: o `leiloai-canario-credencial.yml` prova as tres em toda
+          # rodada, no bloco `deve_poder`. E branch mais commit status ja bastam
+          # para montar a fila, porque a fila nao mora no pull request: mora no
+          # veredito que o `finish` publica em CADA SHA.
+          #
+          # Entao a lista de candidatos tem duas fontes, nesta ordem:
+          #
+          #   1. PULL REQUEST, quando a credencial alcanca. Traz o numero, que e
+          #      o que o merge precisa. Modo completo.
+          #   2. BRANCH, quando nao alcanca. Traz SHA e ordem, que e tudo que a
+          #      CONFERENCIA precisa. Nao traz numero de PR, entao o merge fica
+          #      indisponivel e o passo 3 diz isso em voz alta.
+          #
+          # A fonte 2 e o que torna o modo conferir exercitavel HOJE, com a
+          # credencial que ja existe, em vez de esperar por uma que so o dono
+          # pode criar. A ordem julgada aqui e a MESMA nos dois modos: quem
+          # decide e o `created_at` do status `coordenacao/fila`.
+          if gh pr list --repo "$REPO" --state open --base "$BASE" --limit 100 \
+               --json number,headRefOid \
+               > fila/prs.json 2> fila/erro-nao-publicar.txt; then
+            echo "fonte=pull-request" >> "$GITHUB_OUTPUT"
+            echo "fonte da lista: pull request (modo completo, merge disponivel)"
+            jq -r '.[] | "\(.number) \(.headRefOid)"' fila/prs.json > fila/candidatos.txt
+          elif gh api "repos/$REPO/branches?per_page=100" --paginate \
+                 --jq '.[] | "\(.name) \(.commit.sha)"' \
+                 > fila/branches.txt 2> fila/erro2-nao-publicar.txt; then
+            echo "fonte=branch" >> "$GITHUB_OUTPUT"
+            echo "fonte da lista: branch (sem permissao de PR; confere, nao mergeia)"
+
+            # ----------------------------------------------------------------
+            # BRANCH NAO SE APAGA SOZINHO, ENTAO BRANCH NAO E FILA
+            # ----------------------------------------------------------------
+            # MEDIDO na primeira rodada em modo branch: 246 branches, e ele
+            # declarou 200 "elegiveis", com entregas de 24/08 as 03h30 no meio.
+            # Aquilo estava mergeado havia horas. O modo PR nao tinha o problema
+            # porque `--state open` ja filtra; branch nao filtra nada: ele
+            # sobrevive ao merge e continua carregando o veredito daquele SHA.
+            #
+            # Dois cortes, nesta ordem, e os dois baratos:
+            #
+            #   A. so branch cuja PONTA passou pelo `finish`. Esse conjunto e
+            #      publico e mora NESTE repositorio (`refs/fila-coordenacao/`),
+            #      entao sai de um `git ls-remote` sem credencial nenhuma e sem
+            #      gastar chamada de API.
+            #   B. dos que sobraram, fora os que a base ja contem. Um SHA que e
+            #      ancestral de `feat/landing` esta entregue, e fila e o que
+            #      FALTA entrar.
+            #
+            # A ordem importa: A derruba a maioria de graca, e so o resto paga
+            # chamada de API em B.
+            git ls-remote https://github.com/${{ github.repository }} 'refs/fila-coordenacao/*' \
+              | sed 's#.*refs/fila-coordenacao/##; s/\^{}$//' | sort -u > fila/passaram-pelo-finish.txt
+            echo "SHAs que passaram pelo finish: $(grep -c . fila/passaram-pelo-finish.txt || true)"
+
+            TOTAL=$(grep -c . fila/branches.txt || true)
+            awk -v base="$BASE" '$1 != base && $1 != "main" && $1 != "staging" {print $2}' \
+              fila/branches.txt | sort -u > fila/pontas.txt
+            comm -12 fila/pontas.txt fila/passaram-pelo-finish.txt > fila/com-veredito.txt
+            COM=$(grep -c . fila/com-veredito.txt || true)
+            echo "branches lidos: $TOTAL | pontas com veredito de finish: $COM"
+
+            # CORTE B, com teto anunciado. Cada linha aqui e UMA chamada de API.
+            : > fila/candidatos.txt
+            gastos=0
+            while read -r sha; do
+              [ -n "${sha:-}" ] || continue
+              if [ "$gastos" -ge "$TETO_COMPARACOES" ]; then
+                echo "::warning::teto de $TETO_COMPARACOES comparacoes atingido; pontas restantes NAO foram avaliadas nesta rodada"
+                break
+              fi
+              gastos=$((gastos + 1))
+              # identical/behind = a base ja contem este SHA, logo esta entregue.
+              # Falha de leitura NAO vira "esta na fila": na duvida, fica de fora.
+              rel=$(gh api "repos/$REPO/compare/$BASE...$sha" --jq .status 2>/dev/null || echo erro)
+              case "$rel" in
+                ahead|diverged) printf -- '- %s\n' "$sha" >> fila/candidatos.txt ;;
+                identical|behind) : ;;
+                *) echo "  ignorado  ponta ${sha:0:8}  nao consegui comparar com a base" ;;
+              esac
+            done < fila/com-veredito.txt
+            echo "comparacoes gastas: $gastos | ainda fora da base: $(grep -c . fila/candidatos.txt || true)"
+          else
+            echo "sem_credencial=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::nao consegui listar nem os PRs nem os branches do repositorio privado, entao esta rodada nao puxa a fila e nada e mergeado. Para CONFERIR, o PAT de leitura precisa alcancar branch e commit status do RenatoPassos1/leilao-watch; para MERGEAR, e preciso um segundo PAT LEILOAI_MERGE_PAT com Contents: Write + Pull requests: Write. Se as permissoes ja existirem, isto pode ser falha transitoria da API e a proxima passagem resolve."
+            {
+              echo "### coordenador da fila: parado"
+              echo ""
+              echo "Nao consegui listar PRs nem branches de \`$REPO\`."
+              echo "Nenhum merge foi feito nesta rodada."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "candidatos: $(grep -c . fila/candidatos.txt || true)"
+
+          # ------------------------------------------------------------------
+          # O VEREDITO DE FILA DAQUELE SHA, COM O CARIMBO DE HORA
+          # ------------------------------------------------------------------
+          # O carimbo e a hora do `finish`, e e ele que da a ordem. Ponta que
+          # andou depois do `finish` nao tem status naquele SHA e cai fora
+          # sozinha: o veredito e do SHA, nunca do PR nem do branch.
+          : > fila/vereditos.jsonl
+          while read -r numero sha; do
+            [ -n "${sha:-}" ] || continue
+            linha=$(gh api "repos/$REPO/commits/$sha/status" \
+                      --jq '[.statuses[] | select(.context=="coordenacao/fila")]
+                            | sort_by(.created_at) | last
+                            | {state, created_at}' 2>/dev/null || echo 'null')
+            if [ "$numero" = "-" ]; then numero=null; fi
+            printf '{"numero":%s,"sha":"%s","fila":%s}\n' "$numero" "$sha" "${linha:-null}" \
+              >> fila/vereditos.jsonl
+          done < fila/candidatos.txt
+          echo "vereditos coletados: $(grep -c . fila/vereditos.jsonl || true)"
+
+      # ----------------------------------------------------------------------
+      # 2. DECIDIR, SEM TOKEN NO AMBIENTE
+      # ----------------------------------------------------------------------
+      # Passo deliberadamente SEM `env:`. Hoje ele so roda `jq` deste arquivo,
+      # mas a separacao ja fica de pe para o dia em que a decisao vier do
+      # repositorio privado, como acontece no `leiloai-ci-aprovado.yml`.
+      - name: Decidir a ordem e a elegibilidade
+        id: decidir
+        if: steps.levantar.outputs.sem_credencial != 'true'
+        run: |
+          set -euo pipefail
+
+          # Elegivel = tem veredito de fila com sucesso PARA A PONTA ATUAL. O
+          # veredito e do SHA: ponta que andou depois do `finish` nao tem status
+          # naquele SHA e cai fora sozinha, sem regra extra.
+          jq -s '
+            [ .[] | select(.fila != null and .fila.state == "success") ]
+            | sort_by(.fila.created_at)
+          ' fila/vereditos.jsonl > fila/elegiveis.json
+
+          # SO SHA E NUMERO DE PR SAEM NO LOG. Nome de branch NAO sai, pelo
+          # mesmo motivo que titulo de PR nao sai: `agent/fontes-<algo>` nomeia
+          # o que a entrega toca, e isto aqui e um log publico que se le sem
+          # estar logado.
+          jq -r '.[] | "  elegivel  PR \(.numero // "-")  ponta \(.sha[0:8])  finish \(.fila.created_at)"' \
+            fila/elegiveis.json
+          jq -s -r '.[] | select(.fila == null or .fila.state != "success")
+                        | "  BARRADO   PR \(.numero // "-")  ponta \(.sha[0:8])  sem veredito de fila neste SHA"' \
+            fila/vereditos.jsonl
+
+          PROX=$(jq -r 'if length > 0 then (.[0].numero // "") else "" end' fila/elegiveis.json)
+          PROX_SHA=$(jq -r 'if length > 0 then .[0].sha[0:8] else "" end' fila/elegiveis.json)
+          echo "proximo=$PROX" >> "$GITHUB_OUTPUT"
+          echo "proximo_sha=$PROX_SHA" >> "$GITHUB_OUTPUT"
+          echo "elegiveis=$(jq length fila/elegiveis.json)" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$PROX_SHA" ]; then
+            echo "::notice::nada elegivel agora"
+          elif [ -n "$PROX" ]; then
+            echo "::notice::proximo da fila: PR #$PROX (ponta $PROX_SHA)"
+          else
+            # Sem numero de PR o merge nao tem como ser chamado, e dizer isso e
+            # o ponto: a ordem foi decidida com dado real, e so o ultimo passo
+            # e que falta credencial.
+            echo "::notice::proximo da fila: ponta $PROX_SHA. A ordem foi decidida, mas o merge exige numero de PR, que esta credencial nao alcanca."
+          fi
+
+      # ----------------------------------------------------------------------
+      # 3. MERGEAR (so com credencial de escrita, e so em modo executar)
+      # ----------------------------------------------------------------------
+      - name: Mergear o proximo da fila
+        if: >-
+          steps.levantar.outputs.sem_credencial != 'true' &&
+          steps.decidir.outputs.proximo != '' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.modo == 'executar'
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_MERGE_PAT }}
+          PROX: ${{ steps.decidir.outputs.proximo }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::modo=executar pedido, mas o secret LEILOAI_MERGE_PAT nao existe neste repositorio. Crie um PAT fine-grained limitado a RenatoPassos1/leilao-watch com Contents: write e Pull requests: write, guarde como LEILOAI_MERGE_PAT, e rode de novo. Nao vou tentar mergear sem credencial propria."
+            exit 1
+          fi
+          # MERGE COMMIT, nunca squash: o portao do deploy anda --first-parent e
+          # exige o veredito do SEGUNDO PAI de cada merge. Squash apaga esse pai
+          # e a entrega passaria a ser recusada na VPS, depois de mergeada.
+          # SAIDA DESCARTADA DE PROPOSITO. O `gh pr merge` imprime o TITULO do
+          # PR, e titulo nomeia o que o commit toca: "fix(coleta): o campo do
+          # Superbid...", "feat(caixa): ...". Isso e nome de FONTE RASPADA num
+          # log publico, legivel sem login. O numero do PR basta para auditar,
+          # e ele nao diz nada sobre o conteudo.
+          if gh pr merge "$PROX" --repo RenatoPassos1/leilao-watch --merge >/dev/null 2>&1; then
+            echo "::notice::PR #$PROX mergeado"
+          else
+            echo "::error::falhei ao mergear o PR #$PROX. O detalhe NAO vai para este log (publico); veja o PR no repositorio privado."
+            exit 1
+          fi
+
+      - name: Dizer o que faria, quando so esta conferindo
+        if: >-
+          steps.levantar.outputs.sem_credencial != 'true' &&
+          steps.decidir.outputs.proximo_sha != '' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.modo == 'executar' && steps.decidir.outputs.proximo != '')
+        env:
+          PROX: ${{ steps.decidir.outputs.proximo }}
+          PROX_SHA: ${{ steps.decidir.outputs.proximo_sha }}
+          FONTE: ${{ steps.levantar.outputs.fonte }}
+        run: |
+          if [ -n "${PROX:-}" ]; then
+            echo "::notice::modo conferir: mergearia o PR #$PROX (ponta $PROX_SHA). Para valer, rode com modo=executar (exige o secret LEILOAI_MERGE_PAT)."
+          else
+            echo "::notice::modo conferir por $FONTE: a fila foi lida e ordenada com dado real, e o proximo e a ponta $PROX_SHA. O merge nao esta disponivel porque exige numero de PR, e a credencial de leitura nao alcanca pull request."
+          fi
+          {
+            echo "### coordenador da fila: conferiu"
+            echo ""
+            echo "- fonte da lista: \`$FONTE\`"
+            echo "- proximo: ponta \`$PROX_SHA\`${PROX:+ (PR #$PROX)}"
+            echo "- merge: ${PROX:+disponivel com modo=executar}${PROX:-indisponivel sem permissao de pull request}"
+          } >> "$GITHUB_STEP_SUMMARY"
