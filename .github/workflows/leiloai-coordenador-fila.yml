@@ -163,60 +163,91 @@ jobs:
           set -euo pipefail
           REPO=RenatoPassos1/leilao-watch
           BASE=feat/landing
+          TETO_BRANCHES=200
           mkdir -p fila
 
           # ------------------------------------------------------------------
-          # A CREDENCIAL PODE NAO ALCANCAR PR, E ISSO PRECISA SER DITO, NAO
-          # DESCOBERTO NUM STACK TRACE
+          # DE ONDE SAI A LISTA DE CANDIDATOS, E POR QUE SAO DUAS FONTES
           # ------------------------------------------------------------------
-          # MEDIDO em 25/08/2026, nas duas primeiras rodadas reais deste
-          # workflow: `LEILOAI_STATUS_PAT` le commit status, mas NAO alcanca
-          # pull request. O `gh pr list` morria com
-          # "Resource not accessible by personal access token
-          # (repository.pullRequests)" e o job terminava vermelho, sem dizer o
-          # que faltava. Um workflow que falha de dez em dez minutos com erro
-          # opaco vira ruido, e ruido e ignorado.
+          # MEDIDO em 25/08/2026, nas duas primeiras rodadas reais: o
+          # `LEILOAI_STATUS_PAT` NAO alcanca pull request, nem para LER.
           #
-          # Entao a falta de permissao vira AVISO com a instrucao exata, e o job
-          # sai verde SEM FAZER NADA. Verde-sem-fazer-nada e perigoso quando
-          # esconde trabalho perdido; aqui nao esconde: sem a lista de PRs nao
-          # existe proximo da fila, nada e mergeado, e o passo escreve no resumo
-          # da rodada que ficou parado e por que. A direcao segura da falha e
-          # nao agir, e e essa que ele toma.
+          #     GraphQL: Resource not accessible by personal access token
+          #              (repository.pullRequests)
           #
-          # A stderr vai para ARQUIVO e nunca para o log: o texto e do GitHub e
-          # nao carrega segredo, mas a disciplina deste repositorio publico e
-          # imprimir so o que este arquivo escreve.
-          if ! gh pr list --repo "$REPO" --state open --base "$BASE" --limit 100 \
-                 --json number,headRefName,headRefOid,mergeable,mergeStateStatus \
-                 > fila/prs.json 2> fila/erro-nao-publicar.txt; then
+          # Mas ele alcanca BRANCH, COMMIT STATUS e CONTEUDO, e isso nao e
+          # suposicao: o `leiloai-canario-credencial.yml` prova as tres em toda
+          # rodada, no bloco `deve_poder`. E branch mais commit status ja bastam
+          # para montar a fila, porque a fila nao mora no pull request: mora no
+          # veredito que o `finish` publica em CADA SHA.
+          #
+          # Entao a lista de candidatos tem duas fontes, nesta ordem:
+          #
+          #   1. PULL REQUEST, quando a credencial alcanca. Traz o numero, que e
+          #      o que o merge precisa. Modo completo.
+          #   2. BRANCH, quando nao alcanca. Traz SHA e ordem, que e tudo que a
+          #      CONFERENCIA precisa. Nao traz numero de PR, entao o merge fica
+          #      indisponivel e o passo 3 diz isso em voz alta.
+          #
+          # A fonte 2 e o que torna o modo conferir exercitavel HOJE, com a
+          # credencial que ja existe, em vez de esperar por uma que so o dono
+          # pode criar. A ordem julgada aqui e a MESMA nos dois modos: quem
+          # decide e o `created_at` do status `coordenacao/fila`.
+          if gh pr list --repo "$REPO" --state open --base "$BASE" --limit 100 \
+               --json number,headRefOid \
+               > fila/prs.json 2> fila/erro-nao-publicar.txt; then
+            echo "fonte=pull-request" >> "$GITHUB_OUTPUT"
+            echo "fonte da lista: pull request (modo completo, merge disponivel)"
+            jq -r '.[] | "\(.number) \(.headRefOid)"' fila/prs.json > fila/candidatos.txt
+          elif gh api "repos/$REPO/branches?per_page=100" --paginate \
+                 --jq '.[] | "\(.name) \(.commit.sha)"' \
+                 > fila/branches.txt 2> fila/erro2-nao-publicar.txt; then
+            echo "fonte=branch" >> "$GITHUB_OUTPUT"
+            echo "fonte da lista: branch (sem permissao de PR; confere, nao mergeia)"
+            # Base e branches de longa duracao nao sao entrega: nunca entram.
+            # `-` no lugar do numero: em modo branch nao existe numero de PR, e
+            # inventar um seria pior do que nao ter.
+            TOTAL=$(grep -c . fila/branches.txt || true)
+            awk -v base="$BASE" '$1 != base && $1 != "main" && $1 != "staging" {print "- " $2}' \
+              fila/branches.txt | head -n "$TETO_BRANCHES" > fila/candidatos.txt
+            CAND=$(grep -c . fila/candidatos.txt || true)
+            echo "branches lidos: $TOTAL | candidatos: $CAND | teto: $TETO_BRANCHES"
+            # Teto anunciado, nunca silencioso: corte que nao aparece no log e
+            # lido como "cobri tudo", e nao cobriu.
+            if [ "$TOTAL" -gt "$TETO_BRANCHES" ]; then
+              echo "::warning::mais de $TETO_BRANCHES branches; os excedentes NAO foram avaliados nesta rodada"
+            fi
+          else
             echo "sem_credencial=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::nao consegui listar os PRs do repositorio privado, entao esta rodada nao puxa a fila e nada e mergeado. Causa conhecida: LEILOAI_STATUS_PAT nao tem 'Pull requests: Read'. Conserto: no PAT fine-grained limitado a RenatoPassos1/leilao-watch, conceder Pull requests: Read (para conferir) e, para mergear, um segundo PAT LEILOAI_MERGE_PAT com Contents: Write + Pull requests: Write. Se a permissao ja existir, isto pode ser falha transitoria da API e a proxima passagem resolve."
+            echo "::warning::nao consegui listar nem os PRs nem os branches do repositorio privado, entao esta rodada nao puxa a fila e nada e mergeado. Para CONFERIR, o PAT de leitura precisa alcancar branch e commit status do RenatoPassos1/leilao-watch; para MERGEAR, e preciso um segundo PAT LEILOAI_MERGE_PAT com Contents: Write + Pull requests: Write. Se as permissoes ja existirem, isto pode ser falha transitoria da API e a proxima passagem resolve."
             {
               echo "### coordenador da fila: parado"
               echo ""
-              echo "Nao consegui listar os PRs abertos de \`$REPO\`."
+              echo "Nao consegui listar PRs nem branches de \`$REPO\`."
               echo "Nenhum merge foi feito nesta rodada."
-              echo ""
-              echo "Falta \`Pull requests: Read\` no PAT de leitura."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "PRs abertos: $(jq length fila/prs.json)"
+          echo "candidatos: $(grep -c . fila/candidatos.txt || true)"
 
-          # Para cada PR, o veredito de fila DAQUELE SHA, com o carimbo de hora.
-          # O carimbo e a hora do `finish`, e e ele que da a ordem.
+          # ------------------------------------------------------------------
+          # O VEREDITO DE FILA DAQUELE SHA, COM O CARIMBO DE HORA
+          # ------------------------------------------------------------------
+          # O carimbo e a hora do `finish`, e e ele que da a ordem. Ponta que
+          # andou depois do `finish` nao tem status naquele SHA e cai fora
+          # sozinha: o veredito e do SHA, nunca do PR nem do branch.
           : > fila/vereditos.jsonl
           while read -r numero sha; do
-            [ -n "${numero:-}" ] || continue
+            [ -n "${sha:-}" ] || continue
             linha=$(gh api "repos/$REPO/commits/$sha/status" \
                       --jq '[.statuses[] | select(.context=="coordenacao/fila")]
                             | sort_by(.created_at) | last
                             | {state, created_at}' 2>/dev/null || echo 'null')
+            if [ "$numero" = "-" ]; then numero=null; fi
             printf '{"numero":%s,"sha":"%s","fila":%s}\n' "$numero" "$sha" "${linha:-null}" \
               >> fila/vereditos.jsonl
-          done < <(jq -r '.[] | "\(.number) \(.headRefOid)"' fila/prs.json)
-          echo "vereditos coletados: $(wc -l < fila/vereditos.jsonl)"
+          done < fila/candidatos.txt
+          echo "vereditos coletados: $(grep -c . fila/vereditos.jsonl || true)"
 
       # ----------------------------------------------------------------------
       # 2. DECIDIR, SEM TOKEN NO AMBIENTE
@@ -230,27 +261,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Elegivel = tem veredito de fila com sucesso PARA A PONTA ATUAL, e o
-          # GitHub diz MERGEABLE. Ponta que andou depois do `finish` nao tem
-          # status naquele SHA, entao cai fora sozinha: o veredito e do SHA.
+          # Elegivel = tem veredito de fila com sucesso PARA A PONTA ATUAL. O
+          # veredito e do SHA: ponta que andou depois do `finish` nao tem status
+          # naquele SHA e cai fora sozinha, sem regra extra.
           jq -s '
             [ .[] | select(.fila != null and .fila.state == "success") ]
             | sort_by(.fila.created_at)
           ' fila/vereditos.jsonl > fila/elegiveis.json
 
-          jq -r '.[] | "  elegivel  #\(.numero)  ponta \(.sha[0:8])  finish \(.fila.created_at)"' \
+          # SO SHA E NUMERO DE PR SAEM NO LOG. Nome de branch NAO sai, pelo
+          # mesmo motivo que titulo de PR nao sai: `agent/fontes-<algo>` nomeia
+          # o que a entrega toca, e isto aqui e um log publico que se le sem
+          # estar logado.
+          jq -r '.[] | "  elegivel  PR \(.numero // "-")  ponta \(.sha[0:8])  finish \(.fila.created_at)"' \
             fila/elegiveis.json
           jq -s -r '.[] | select(.fila == null or .fila.state != "success")
-                        | "  BARRADO   #\(.numero)  ponta \(.sha[0:8])  sem veredito de fila neste SHA"' \
+                        | "  BARRADO   PR \(.numero // "-")  ponta \(.sha[0:8])  sem veredito de fila neste SHA"' \
             fila/vereditos.jsonl
 
-          PROX=$(jq -r 'if length > 0 then .[0].numero else "" end' fila/elegiveis.json)
+          PROX=$(jq -r 'if length > 0 then (.[0].numero // "") else "" end' fila/elegiveis.json)
+          PROX_SHA=$(jq -r 'if length > 0 then .[0].sha[0:8] else "" end' fila/elegiveis.json)
           echo "proximo=$PROX" >> "$GITHUB_OUTPUT"
+          echo "proximo_sha=$PROX_SHA" >> "$GITHUB_OUTPUT"
           echo "elegiveis=$(jq length fila/elegiveis.json)" >> "$GITHUB_OUTPUT"
-          if [ -n "$PROX" ]; then
-            echo "::notice::proximo da fila: PR #$PROX"
-          else
+
+          if [ -z "$PROX_SHA" ]; then
             echo "::notice::nada elegivel agora"
+          elif [ -n "$PROX" ]; then
+            echo "::notice::proximo da fila: PR #$PROX (ponta $PROX_SHA)"
+          else
+            # Sem numero de PR o merge nao tem como ser chamado, e dizer isso e
+            # o ponto: a ordem foi decidida com dado real, e so o ultimo passo
+            # e que falta credencial.
+            echo "::notice::proximo da fila: ponta $PROX_SHA. A ordem foi decidida, mas o merge exige numero de PR, que esta credencial nao alcanca."
           fi
 
       # ----------------------------------------------------------------------
@@ -289,9 +332,22 @@ jobs:
       - name: Dizer o que faria, quando so esta conferindo
         if: >-
           steps.levantar.outputs.sem_credencial != 'true' &&
-          steps.decidir.outputs.proximo != '' &&
-          !(github.event_name == 'workflow_dispatch' && inputs.modo == 'executar')
+          steps.decidir.outputs.proximo_sha != '' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.modo == 'executar' && steps.decidir.outputs.proximo != '')
         env:
           PROX: ${{ steps.decidir.outputs.proximo }}
+          PROX_SHA: ${{ steps.decidir.outputs.proximo_sha }}
+          FONTE: ${{ steps.levantar.outputs.fonte }}
         run: |
-          echo "::notice::modo conferir: mergearia o PR #$PROX. Para valer, rode este workflow com modo=executar (exige o secret LEILOAI_MERGE_PAT)."
+          if [ -n "${PROX:-}" ]; then
+            echo "::notice::modo conferir: mergearia o PR #$PROX (ponta $PROX_SHA). Para valer, rode com modo=executar (exige o secret LEILOAI_MERGE_PAT)."
+          else
+            echo "::notice::modo conferir por $FONTE: a fila foi lida e ordenada com dado real, e o proximo e a ponta $PROX_SHA. O merge nao esta disponivel porque exige numero de PR, e a credencial de leitura nao alcanca pull request."
+          fi
+          {
+            echo "### coordenador da fila: conferiu"
+            echo ""
+            echo "- fonte da lista: \`$FONTE\`"
+            echo "- proximo: ponta \`$PROX_SHA\`${PROX:+ (PR #$PROX)}"
+            echo "- merge: ${PROX:+disponivel com modo=executar}${PROX:-indisponivel sem permissao de pull request}"
+          } >> "$GITHUB_STEP_SUMMARY"
