@@ -370,7 +370,7 @@ jobs:
         id: mergear
         if: >-
           steps.levantar.outputs.sem_credencial != 'true' &&
-          steps.decidir.outputs.proximo != '' &&
+          steps.decidir.outputs.proximo_sha != '' &&
           github.event_name != 'push' &&
           !(github.event_name == 'workflow_dispatch' && inputs.modo == 'conferir')
         env:
@@ -400,6 +400,30 @@ jobs:
               echo "- falta o secret \`LEILOAI_MERGE_PAT\`"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+
+          # SEM NUMERO DE PR, RESOLVER O NUMERO. E O PASSO CERTO PARA ISSO.
+          # Quando a fila veio por BRANCH (credencial de leitura sem acesso a
+          # pull request), `PROX` chega vazio e so temos o SHA. Merge precisa de
+          # numero. Quem pode perguntar isso e justamente esta credencial, que
+          # tem `Pull requests: write`, e a pergunta e barata: UM SHA, UMA
+          # chamada. A listagem em massa continua saindo da credencial de
+          # LEITURA, no passo 1, que e a separacao que se quer preservar.
+          #
+          # O filtro e estreito de proposito: `/commits/<sha>/pulls` devolve
+          # todo PR associado ao commit, inclusive fechado, de outra base, ou
+          # cuja ponta ja andou. Mergear qualquer um desses seria mergear coisa
+          # diferente da que a fila julgou.
+          if [ -z "${PROX:-}" ]; then
+            PROX=$(gh api "repos/RenatoPassos1/leilao-watch/commits/$PROX_SHA/pulls" \
+                     --jq 'map(select(.state=="open" and .draft==false
+                                      and .base.ref=="feat/landing"))
+                           | .[0].number // empty' 2>/dev/null || true)
+            if [ -z "${PROX:-}" ]; then
+              echo "::notice::a ponta $PROX_SHA passou pelo finish mas nao tem PR aberto para feat/landing (ou o PR e rascunho). Nada a mergear nesta rodada; quando o autor abrir o PR, a passagem seguinte pega."
+              exit 0
+            fi
+            echo "numero de PR resolvido a partir do SHA: #$PROX"
           fi
 
           # ESCOPO ERRADO FALHA COMO ESCOPO AUSENTE, E ISSO JA CUSTOU CARO.
@@ -443,8 +467,7 @@ jobs:
         if: >-
           steps.levantar.outputs.sem_credencial != 'true' &&
           steps.decidir.outputs.proximo_sha != '' &&
-          (steps.decidir.outputs.proximo == '' ||
-           github.event_name == 'push' ||
+          (github.event_name == 'push' ||
            (github.event_name == 'workflow_dispatch' && inputs.modo == 'conferir'))
         env:
           PROX: ${{ steps.decidir.outputs.proximo }}
