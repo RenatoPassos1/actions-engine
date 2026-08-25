@@ -114,9 +114,25 @@ name: "LeilôAI: coordenador da fila"
 
 on:
   schedule:
-    # De 10 em 10 minutos. Mais curto que isso nao ajuda: o CI publico leva por
-    # volta de dez minutos, entao duas passagens seguidas veriam o mesmo estado.
-    - cron: "*/10 * * * *"
+    # REDE DE SEGURANCA, NAO O MECANISMO. Quem acorda este workflow no momento
+    # que importa e o `agentctl finish`, com `gh workflow run ... -f
+    # modo=executar`, assim que uma entrega passa pelo portao.
+    #
+    # A versao anterior pedia `*/10` e o GitHub NAO honrava. Medido em
+    # 25/08/2026, com o arquivo no `main` desde 01h52 e o workflow `active`:
+    # DOIS disparos em quase tres horas (03h00:47 e 03h56:30), ou seja cerca de
+    # um por hora contra os seis declarados. A causa nao e deste arquivo: este
+    # repositorio tem 36 workflows com `schedule`, SEIS deles em `*/5`, e o
+    # GitHub desprioriza alta frequencia sob essa carga. Pedir de novo o que ja
+    # nao foi atendido so produziria um numero bonito no YAML.
+    #
+    # Entao pede-se o que da para receber, e o cron passa a cobrir apenas o que
+    # o disparo do `finish` nao cobre: merge feito a mao, sem entrega depois.
+    #
+    # `23` e nao `0`: a hora cheia e a mais disputada, aqui dentro inclusive
+    # (ha quatro workflows em `0 */6` e dois em `0 * * * *`). Deslocar e de
+    # graca e ja e o costume deste repositorio (`41 */2`, `37 5`, `30 */6`).
+    - cron: "23 * * * *"
   workflow_dispatch:
     inputs:
       modo:
