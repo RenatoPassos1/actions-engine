@@ -163,7 +163,11 @@ jobs:
           set -euo pipefail
           REPO=RenatoPassos1/leilao-watch
           BASE=feat/landing
-          TETO_COMPARACOES=40
+          # 80 e folga sobre o medido: na primeira rodada com os cortes,
+          # 246 branches viraram 45 pontas com veredito, e o teto de 40
+          # cortava 5. 80 chamadas a cada 10 min sao 480/hora, contra um
+          # limite de 5.000, e o aviso continua saindo se um dia cortar.
+          TETO_COMPARACOES=80
           mkdir -p fila
 
           # ------------------------------------------------------------------
