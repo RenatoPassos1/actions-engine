@@ -75,27 +75,40 @@
 # relatorio seleciona campo a campo, e o `gh pr merge` tem a saida descartada.
 #
 # ============================================================================
-# ESTADO ATUAL: DECIDE E RELATA, AINDA NAO MERGEIA
+# ESTADO ATUAL: NEM CONFERIR ELE CONSEGUE, E O MOTIVO ESTA MEDIDO
 # ============================================================================
 #
-# Mergear um PR exige credencial com ESCRITA no `leilao-watch`, e nenhuma das
-# que existem aqui hoje tem isso: `LEILOAI_STATUS_PAT` e de leitura, e e assim
-# de proposito (a decisao de 21/08/2026 tirou `Contents: write` justamente para
-# a credencial que julga um repositorio nao poder escrever nele).
+# A primeira versao deste arquivo dizia que ele "nasce em modo conferir, e assim
+# a metade dificil fica exercitada antes de existir credencial de escrita".
+# ISSO ERA FALSO, e as duas primeiras rodadas reais mostraram por que:
 #
-# Entao este workflow nasce em modo CONFERIR: ele decide quem e o proximo, diz
-# por que, e nao mergeia. Assim a metade dificil (ordem, elegibilidade, leitura
-# dos vereditos) fica exercitada e visivel ANTES de existir qualquer credencial
-# de escrita na nuvem.
+#     GraphQL: Resource not accessible by personal access token
+#              (repository.pullRequests)
 #
-# Para ligar o merge e preciso, nesta ordem:
-#   1. o dono criar um PAT FINE-GRAINED limitado a `RenatoPassos1/leilao-watch`,
-#      com `Contents: write` e `Pull requests: write`, e NADA ALEM disso;
-#   2. guardar como secret `LEILOAI_MERGE_PAT` neste repositorio;
-#   3. rodar com `modo=executar`.
+# `LEILOAI_STATUS_PAT` le COMMIT STATUS do `leilao-watch`, e so isso. Nao
+# alcanca pull request, nem para LER. Entao o `gh pr list` do primeiro passo
+# morria, e o job terminava vermelho sem dizer o que faltava. Nada era
+# exercitado: ele nao chegava a decidir coisa nenhuma.
 #
-# Enquanto o secret nao existir, `modo=executar` recusa e explica, em vez de
-# tentar e falhar no meio.
+# Duas permissoes diferentes, para dois momentos diferentes:
+#
+#   PARA CONFERIR (decidir a ordem e relatar, sem mergear)
+#     `Pull requests: Read` no PAT de leitura. Sem isso, este workflow avisa e
+#     sai verde sem fazer nada, em vez de falhar de dez em dez minutos com um
+#     erro opaco. Ele nao PODE agir errado nesse estado: sem a lista de PRs nao
+#     existe "proximo da fila".
+#
+#   PARA MERGEAR
+#     um SEGUNDO PAT, fine-grained, limitado a `RenatoPassos1/leilao-watch`,
+#     com `Contents: write` e `Pull requests: write` e NADA ALEM, guardado como
+#     secret `LEILOAI_MERGE_PAT`, e rodado com `modo=executar`.
+#
+# Os dois separados de proposito, e na direcao da decisao de 21/08/2026: a
+# credencial que JULGA um repositorio nao escreve nele. Quem le para relatar nao
+# precisa poder mergear, e quem mergeia so e usado no passo que mergeia.
+#
+# Enquanto o secret de escrita nao existir, `modo=executar` recusa e explica,
+# em vez de tentar e falhar no meio.
 
 name: "LeilôAI: coordenador da fila"
 
@@ -152,10 +165,43 @@ jobs:
           BASE=feat/landing
           mkdir -p fila
 
-          # `--json` limitado ao que decide: numero, branch, ponta, mergeavel.
-          gh pr list --repo "$REPO" --state open --base "$BASE" --limit 100 \
-            --json number,headRefName,headRefOid,mergeable,mergeStateStatus \
-            > fila/prs.json
+          # ------------------------------------------------------------------
+          # A CREDENCIAL PODE NAO ALCANCAR PR, E ISSO PRECISA SER DITO, NAO
+          # DESCOBERTO NUM STACK TRACE
+          # ------------------------------------------------------------------
+          # MEDIDO em 25/08/2026, nas duas primeiras rodadas reais deste
+          # workflow: `LEILOAI_STATUS_PAT` le commit status, mas NAO alcanca
+          # pull request. O `gh pr list` morria com
+          # "Resource not accessible by personal access token
+          # (repository.pullRequests)" e o job terminava vermelho, sem dizer o
+          # que faltava. Um workflow que falha de dez em dez minutos com erro
+          # opaco vira ruido, e ruido e ignorado.
+          #
+          # Entao a falta de permissao vira AVISO com a instrucao exata, e o job
+          # sai verde SEM FAZER NADA. Verde-sem-fazer-nada e perigoso quando
+          # esconde trabalho perdido; aqui nao esconde: sem a lista de PRs nao
+          # existe proximo da fila, nada e mergeado, e o passo escreve no resumo
+          # da rodada que ficou parado e por que. A direcao segura da falha e
+          # nao agir, e e essa que ele toma.
+          #
+          # A stderr vai para ARQUIVO e nunca para o log: o texto e do GitHub e
+          # nao carrega segredo, mas a disciplina deste repositorio publico e
+          # imprimir so o que este arquivo escreve.
+          if ! gh pr list --repo "$REPO" --state open --base "$BASE" --limit 100 \
+                 --json number,headRefName,headRefOid,mergeable,mergeStateStatus \
+                 > fila/prs.json 2> fila/erro-nao-publicar.txt; then
+            echo "sem_credencial=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::nao consegui listar os PRs do repositorio privado, entao esta rodada nao puxa a fila e nada e mergeado. Causa conhecida: LEILOAI_STATUS_PAT nao tem 'Pull requests: Read'. Conserto: no PAT fine-grained limitado a RenatoPassos1/leilao-watch, conceder Pull requests: Read (para conferir) e, para mergear, um segundo PAT LEILOAI_MERGE_PAT com Contents: Write + Pull requests: Write. Se a permissao ja existir, isto pode ser falha transitoria da API e a proxima passagem resolve."
+            {
+              echo "### coordenador da fila: parado"
+              echo ""
+              echo "Nao consegui listar os PRs abertos de \`$REPO\`."
+              echo "Nenhum merge foi feito nesta rodada."
+              echo ""
+              echo "Falta \`Pull requests: Read\` no PAT de leitura."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           echo "PRs abertos: $(jq length fila/prs.json)"
 
           # Para cada PR, o veredito de fila DAQUELE SHA, com o carimbo de hora.
@@ -180,6 +226,7 @@ jobs:
       # repositorio privado, como acontece no `leiloai-ci-aprovado.yml`.
       - name: Decidir a ordem e a elegibilidade
         id: decidir
+        if: steps.levantar.outputs.sem_credencial != 'true'
         run: |
           set -euo pipefail
 
@@ -211,6 +258,7 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Mergear o proximo da fila
         if: >-
+          steps.levantar.outputs.sem_credencial != 'true' &&
           steps.decidir.outputs.proximo != '' &&
           github.event_name == 'workflow_dispatch' &&
           inputs.modo == 'executar'
@@ -240,6 +288,7 @@ jobs:
 
       - name: Dizer o que faria, quando so esta conferindo
         if: >-
+          steps.levantar.outputs.sem_credencial != 'true' &&
           steps.decidir.outputs.proximo != '' &&
           !(github.event_name == 'workflow_dispatch' && inputs.modo == 'executar')
         env:
