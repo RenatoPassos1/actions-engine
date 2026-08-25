@@ -163,7 +163,7 @@ jobs:
           set -euo pipefail
           REPO=RenatoPassos1/leilao-watch
           BASE=feat/landing
-          TETO_BRANCHES=200
+          TETO_COMPARACOES=40
           mkdir -p fila
 
           # ------------------------------------------------------------------
@@ -204,19 +204,59 @@ jobs:
                  > fila/branches.txt 2> fila/erro2-nao-publicar.txt; then
             echo "fonte=branch" >> "$GITHUB_OUTPUT"
             echo "fonte da lista: branch (sem permissao de PR; confere, nao mergeia)"
-            # Base e branches de longa duracao nao sao entrega: nunca entram.
-            # `-` no lugar do numero: em modo branch nao existe numero de PR, e
-            # inventar um seria pior do que nao ter.
+
+            # ----------------------------------------------------------------
+            # BRANCH NAO SE APAGA SOZINHO, ENTAO BRANCH NAO E FILA
+            # ----------------------------------------------------------------
+            # MEDIDO na primeira rodada em modo branch: 246 branches, e ele
+            # declarou 200 "elegiveis", com entregas de 24/08 as 03h30 no meio.
+            # Aquilo estava mergeado havia horas. O modo PR nao tinha o problema
+            # porque `--state open` ja filtra; branch nao filtra nada: ele
+            # sobrevive ao merge e continua carregando o veredito daquele SHA.
+            #
+            # Dois cortes, nesta ordem, e os dois baratos:
+            #
+            #   A. so branch cuja PONTA passou pelo `finish`. Esse conjunto e
+            #      publico e mora NESTE repositorio (`refs/fila-coordenacao/`),
+            #      entao sai de um `git ls-remote` sem credencial nenhuma e sem
+            #      gastar chamada de API.
+            #   B. dos que sobraram, fora os que a base ja contem. Um SHA que e
+            #      ancestral de `feat/landing` esta entregue, e fila e o que
+            #      FALTA entrar.
+            #
+            # A ordem importa: A derruba a maioria de graca, e so o resto paga
+            # chamada de API em B.
+            git ls-remote https://github.com/${{ github.repository }} 'refs/fila-coordenacao/*' \
+              | sed 's#.*refs/fila-coordenacao/##; s/\^{}$//' | sort -u > fila/passaram-pelo-finish.txt
+            echo "SHAs que passaram pelo finish: $(grep -c . fila/passaram-pelo-finish.txt || true)"
+
             TOTAL=$(grep -c . fila/branches.txt || true)
-            awk -v base="$BASE" '$1 != base && $1 != "main" && $1 != "staging" {print "- " $2}' \
-              fila/branches.txt | head -n "$TETO_BRANCHES" > fila/candidatos.txt
-            CAND=$(grep -c . fila/candidatos.txt || true)
-            echo "branches lidos: $TOTAL | candidatos: $CAND | teto: $TETO_BRANCHES"
-            # Teto anunciado, nunca silencioso: corte que nao aparece no log e
-            # lido como "cobri tudo", e nao cobriu.
-            if [ "$TOTAL" -gt "$TETO_BRANCHES" ]; then
-              echo "::warning::mais de $TETO_BRANCHES branches; os excedentes NAO foram avaliados nesta rodada"
-            fi
+            awk -v base="$BASE" '$1 != base && $1 != "main" && $1 != "staging" {print $2}' \
+              fila/branches.txt | sort -u > fila/pontas.txt
+            comm -12 fila/pontas.txt fila/passaram-pelo-finish.txt > fila/com-veredito.txt
+            COM=$(grep -c . fila/com-veredito.txt || true)
+            echo "branches lidos: $TOTAL | pontas com veredito de finish: $COM"
+
+            # CORTE B, com teto anunciado. Cada linha aqui e UMA chamada de API.
+            : > fila/candidatos.txt
+            gastos=0
+            while read -r sha; do
+              [ -n "${sha:-}" ] || continue
+              if [ "$gastos" -ge "$TETO_COMPARACOES" ]; then
+                echo "::warning::teto de $TETO_COMPARACOES comparacoes atingido; pontas restantes NAO foram avaliadas nesta rodada"
+                break
+              fi
+              gastos=$((gastos + 1))
+              # identical/behind = a base ja contem este SHA, logo esta entregue.
+              # Falha de leitura NAO vira "esta na fila": na duvida, fica de fora.
+              rel=$(gh api "repos/$REPO/compare/$BASE...$sha" --jq .status 2>/dev/null || echo erro)
+              case "$rel" in
+                ahead|diverged) printf -- '- %s\n' "$sha" >> fila/candidatos.txt ;;
+                identical|behind) : ;;
+                *) echo "  ignorado  ponta ${sha:0:8}  nao consegui comparar com a base" ;;
+              esac
+            done < fila/com-veredito.txt
+            echo "comparacoes gastas: $gastos | ainda fora da base: $(grep -c . fila/candidatos.txt || true)"
           else
             echo "sem_credencial=true" >> "$GITHUB_OUTPUT"
             echo "::warning::nao consegui listar nem os PRs nem os branches do repositorio privado, entao esta rodada nao puxa a fila e nada e mergeado. Para CONFERIR, o PAT de leitura precisa alcancar branch e commit status do RenatoPassos1/leilao-watch; para MERGEAR, e preciso um segundo PAT LEILOAI_MERGE_PAT com Contents: Write + Pull requests: Write. Se as permissoes ja existirem, isto pode ser falha transitoria da API e a proxima passagem resolve."
