@@ -344,6 +344,10 @@ jobs:
                         | "  BARRADO   PR \(.numero // "-")  ponta \(.sha[0:8])  sem veredito de fila neste SHA"' \
             fila/vereditos.jsonl
 
+          # A LISTA INTEIRA, em ordem, e nao so o primeiro. Ver o passo 3: uma
+          # entrada presa nao pode mais bloquear as de tras.
+          jq -r '.[] | "\(.numero // "-") \(.sha)"' fila/elegiveis.json > fila/ordem.txt
+
           PROX=$(jq -r 'if length > 0 then (.[0].numero // "") else "" end' fila/elegiveis.json)
           PROX_SHA=$(jq -r 'if length > 0 then .[0].sha[0:8] else "" end' fila/elegiveis.json)
           echo "proximo=$PROX" >> "$GITHUB_OUTPUT"
@@ -355,10 +359,12 @@ jobs:
           elif [ -n "$PROX" ]; then
             echo "::notice::proximo da fila: PR #$PROX (ponta $PROX_SHA)"
           else
-            # Sem numero de PR o merge nao tem como ser chamado, e dizer isso e
-            # o ponto: a ordem foi decidida com dado real, e so o ultimo passo
-            # e que falta credencial.
-            echo "::notice::proximo da fila: ponta $PROX_SHA. A ordem foi decidida, mas o merge exige numero de PR, que esta credencial nao alcanca."
+            # Sem numero de PR AQUI nao quer dizer sem merge: desde o PR #251 o
+            # passo de merge resolve o numero a partir do SHA, com a credencial
+            # de escrita. Dizer "o merge exige numero que esta credencial nao
+            # alcanca" era verdade quando foi escrito e virou mentira depois,
+            # que e o modo de falha de mensagem presa a uma implementacao.
+            echo "::notice::proximo da fila: ponta $PROX_SHA (a lista veio por branch; o numero do PR, se houver, e resolvido no passo de merge)."
           fi
 
       # ----------------------------------------------------------------------
@@ -418,93 +424,96 @@ jobs:
             exit 0
           fi
 
-          # SEM NUMERO DE PR, RESOLVER O NUMERO. E O PASSO CERTO PARA ISSO.
-          # Quando a fila veio por BRANCH (credencial de leitura sem acesso a
-          # pull request), `PROX` chega vazio e so temos o SHA. Merge precisa de
-          # numero. Quem pode perguntar isso e justamente esta credencial, que
-          # tem `Pull requests: write`, e a pergunta e barata: UM SHA, UMA
-          # chamada. A listagem em massa continua saindo da credencial de
-          # LEITURA, no passo 1, que e a separacao que se quer preservar.
+          # PERCORRE A FILA ATE ACHAR UMA QUE DE PARA MERGEAR.
           #
-          # O filtro e estreito de proposito: `/commits/<sha>/pulls` devolve
-          # todo PR associado ao commit, inclusive fechado, de outra base, ou
-          # cuja ponta ja andou. Mergear qualquer um desses seria mergear coisa
-          # diferente da que a fila julgou.
-          if [ -z "${PROX:-}" ]; then
-            PROX=$(gh api "repos/RenatoPassos1/leilao-watch/commits/$PROX_SHA/pulls" \
-                     --jq 'map(select(.state=="open" and .draft==false
-                                      and .base.ref=="feat/landing"))
-                           | .[0].number // empty' 2>/dev/null || true)
-            if [ -z "${PROX:-}" ]; then
-              echo "::notice::a ponta $PROX_SHA passou pelo finish mas nao tem PR aberto para feat/landing (ou o PR e rascunho). Nada a mergear nesta rodada; quando o autor abrir o PR, a passagem seguinte pega."
-              exit 0
+          # MEDIDO em 25/08/2026, rodada 32849656851: duas entradas elegiveis, e
+          # a primeira (`a81982e7`) estava presa sem PR aberto, porque o
+          # conteudo dela foi adotado por cherry-pick em outro PR. A versao
+          # anterior disse "nada a mergear nesta rodada" e SAIU, sem nunca olhar
+          # a segunda, que era o PR #402, MERGEABLE havia 14 minutos. Uma
+          # entrada presa bloqueava todas as de tras, para sempre.
+          #
+          # O coordenador LOCAL nunca teve esse defeito: ele registra a
+          # bloqueada e segue. As duas metades da mesma ferramenta nao podem
+          # discordar sobre isso.
+          #
+          # MERGE CONTINUA SENDO UM POR RODADA, de proposito: cada merge muda a
+          # base e pode tornar a proxima CONFLITADA, entao decidir a seguinte
+          # com dado velho seria decidir errado. O que muda e so que "nao deu na
+          # primeira" deixou de significar "nao deu em nenhuma".
+          mergeou=0
+          pulados=0
+          while read -r numero sha; do
+            [ -n "${sha:-}" ] || continue
+            curto="${sha:0:8}"
+
+            if [ "$numero" = "-" ]; then
+              # O filtro e estreito de proposito: `/commits/<sha>/pulls` devolve
+              # todo PR associado ao commit, inclusive fechado, de outra base ou
+              # rascunho. Mergear qualquer um seria mergear coisa diferente da
+              # que a fila julgou.
+              numero=$(gh api "repos/RenatoPassos1/leilao-watch/commits/$sha/pulls" \\
+                         --jq 'map(select(.state=="open" and .draft==false
+                                          and .base.ref=="feat/landing"))
+                               | .[0].number // empty' 2>/dev/null || true)
             fi
-            echo "numero de PR resolvido a partir do SHA: #$PROX"
-          fi
 
-          # ESCOPO ERRADO FALHA COMO ESCOPO AUSENTE, E ISSO JA CUSTOU CARO.
-          # Um PAT fine-grained sem o toggle certo responde o mesmo
-          # "Resource not accessible by personal access token" que um PAT
-          # inexistente, e foi assim que a versao de leitura passou duas
-          # rodadas morrendo sem dizer o que faltava. Uma leitura barata antes
-          # do merge transforma isso numa frase acionavel.
-          estado=$(gh pr view "$PROX" --repo RenatoPassos1/leilao-watch \
-                     --json mergeable,state --jq '.state + " " + .mergeable' 2>/dev/null || true)
-          if [ -z "$estado" ]; then
-            echo "::error::o secret LEILOAI_MERGE_PAT existe mas nao consegue nem LER o PR #$PROX. Confira, no PAT fine-grained: o repositorio RenatoPassos1/leilao-watch selecionado, Pull requests com acesso de Escrita (que ja inclui leitura), Contents com Escrita, e a validade nao expirada. Nao vou tentar mergear com credencial que nao le."
+            if [ -z "${numero:-}" ]; then
+              echo "::notice::ponta $curto passou pelo finish mas nao tem PR aberto para feat/landing. Pulando para a proxima da fila."
+              pulados=$((pulados + 1))
+              continue
+            fi
+
+            estado=$(gh pr view "$numero" --repo RenatoPassos1/leilao-watch \\
+                       --json mergeable,state --jq '.state + " " + .mergeable' 2>/dev/null || true)
+            if [ -z "$estado" ]; then
+              echo "::error::o secret LEILOAI_MERGE_PAT existe mas nao consegue nem LER o PR #$numero. Confira, no PAT fine-grained: o repositorio RenatoPassos1/leilao-watch selecionado, Pull requests com acesso de Escrita (que ja inclui leitura), Contents com Escrita, e a validade nao expirada. Nao vou tentar mergear com credencial que nao le."
+              exit 1
+            fi
+
+            case "$estado" in
+              "OPEN MERGEABLE") : ;;
+              "OPEN UNKNOWN")
+                echo "::notice::PR #$numero ainda com mergeable=UNKNOWN (o GitHub calcula em segundo plano). Pulando para a proxima; a rodada seguinte reavalia."
+                pulados=$((pulados + 1)); continue ;;
+              "OPEN CONFLICTING")
+                echo "::notice::PR #$numero esta em conflito com a base. Quem resolve e o autor, com rebase, e depois um novo finish (o veredito e do SHA). Pulando para a proxima."
+                pulados=$((pulados + 1)); continue ;;
+              *)
+                echo "::notice::PR #$numero em estado que nao autoriza merge ($estado). Pulando para a proxima."
+                pulados=$((pulados + 1)); continue ;;
+            esac
+
+            # MERGE COMMIT, nunca squash: o portao do deploy anda --first-parent
+            # e exige o veredito do SEGUNDO PAI de cada merge. Squash apaga esse
+            # pai e a entrega passaria a ser recusada na VPS, depois de mergeada.
+            # SAIDA DESCARTADA DE PROPOSITO: o `gh pr merge` imprime o TITULO do
+            # PR, e titulo nomeia o que o commit toca ("fix(coleta): o campo do
+            # <fonte>..."). Isso e nome de FONTE RASPADA num log publico,
+            # legivel sem login. O numero basta para auditar.
+            if gh pr merge "$numero" --repo RenatoPassos1/leilao-watch --merge >/dev/null 2>&1; then
+              echo "::notice::PR #$numero mergeado (ponta $curto)"
+              echo "mergeou=true" >> "$GITHUB_OUTPUT"
+              {
+                echo "### coordenador da fila: mergeou"
+                echo ""
+                echo "- PR #$numero, ponta \`$curto\`"
+                [ "$pulados" -gt 0 ] && echo "- $pulados entrada(s) pulada(s) antes desta"
+              } >> "$GITHUB_STEP_SUMMARY"
+              mergeou=1
+              break
+            fi
+            echo "::error::falhei ao mergear o PR #$numero. O detalhe NAO vai para este log (publico); veja o PR no repositorio privado."
             exit 1
-          fi
+          done < fila/ordem.txt
 
-          # "AINDA NAO DA" NAO E "FALHEI", E CONFUNDIR OS DOIS FAZ ESTE WORKFLOW
-          # CRIAR ALARME FALSO.
-          # A primeira versao mandava direto para o `gh pr merge` e tratava
-          # qualquer recusa como erro. Em 25/08/2026 o PR #390 estava
-          # CONFLICTING (duas sessoes acrescentaram no fim do mesmo ledger), e o
-          # resultado foram DUAS rodadas vermelhas por algo que era o sistema
-          # funcionando: conflito se resolve com rebase do autor, nao com
-          # insistencia do coordenador. O coordenador LOCAL sempre tratou isso
-          # como "bloqueado", e as duas metades da mesma ferramenta nao podem
-          # discordar sobre o que e falha.
-          #
-          # UNKNOWN e caso a parte: o GitHub calcula `mergeable` em segundo
-          # plano, e logo apos um merge na base os PRs seguintes respondem
-          # UNKNOWN. Tratar como recusa faria o coordenador parar sozinho a cada
-          # merge; a passagem seguinte resolve.
-          case "$estado" in
-            "OPEN MERGEABLE") : ;;
-            "OPEN UNKNOWN")
-              echo "::notice::PR #$PROX ainda com mergeable=UNKNOWN (o GitHub calcula em segundo plano). Nada feito nesta rodada; a proxima resolve."
-              exit 0 ;;
-            "OPEN CONFLICTING")
-              echo "::notice::PR #$PROX esta em conflito com a base. Isto NAO e falha do coordenador: quem resolve e o autor, com rebase, e depois um novo finish (o veredito e do SHA). Nada mergeado nesta rodada."
-              exit 0 ;;
-            "MERGED "*|"CLOSED "*)
-              echo "::notice::PR #$PROX ja nao esta aberto ($estado). A fila sera reconciliada; nada a fazer."
-              exit 0 ;;
-            *)
-              echo "::notice::PR #$PROX em estado que nao autoriza merge ($estado). Nada feito nesta rodada."
-              exit 0 ;;
-          esac
-
-          # MERGE COMMIT, nunca squash: o portao do deploy anda --first-parent e
-          # exige o veredito do SEGUNDO PAI de cada merge. Squash apaga esse pai
-          # e a entrega passaria a ser recusada na VPS, depois de mergeada.
-          # SAIDA DESCARTADA DE PROPOSITO. O `gh pr merge` imprime o TITULO do
-          # PR, e titulo nomeia o que o commit toca: "fix(coleta): o campo do
-          # <fonte>...". Isso e nome de FONTE RASPADA num log publico, legivel
-          # sem login. O numero do PR basta para auditar, e ele nao diz nada
-          # sobre o conteudo.
-          if gh pr merge "$PROX" --repo RenatoPassos1/leilao-watch --merge >/dev/null 2>&1; then
-            echo "::notice::PR #$PROX mergeado (ponta $PROX_SHA)"
-            echo "mergeou=true" >> "$GITHUB_OUTPUT"
+          if [ "$mergeou" -eq 0 ]; then
+            echo "::notice::nenhuma das $pulados entrada(s) elegivel(is) pode ser mergeada agora. Nada foi feito, e isto NAO e falha: e a fila esperando o autor."
             {
-              echo "### coordenador da fila: mergeou"
+              echo "### coordenador da fila: nada a mergear"
               echo ""
-              echo "- PR #$PROX, ponta \`$PROX_SHA\`"
+              echo "- $pulados entrada(s) elegivel(is), nenhuma mergeavel agora"
             } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::error::falhei ao mergear o PR #$PROX. O detalhe NAO vai para este log (publico); veja o PR no repositorio privado."
-            exit 1
           fi
 
       # ----------------------------------------------------------------------
