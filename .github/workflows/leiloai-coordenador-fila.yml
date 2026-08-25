@@ -198,11 +198,16 @@ jobs:
           # pode criar. A ordem julgada aqui e a MESMA nos dois modos: quem
           # decide e o `created_at` do status `coordenacao/fila`.
           if gh pr list --repo "$REPO" --state open --base "$BASE" --limit 100 \
-               --json number,headRefOid \
+               --json number,headRefOid,isDraft \
                > fila/prs.json 2> fila/erro-nao-publicar.txt; then
             echo "fonte=pull-request" >> "$GITHUB_OUTPUT"
             echo "fonte da lista: pull request (modo completo, merge disponivel)"
-            jq -r '.[] | "\(.number) \(.headRefOid)"' fila/prs.json > fila/candidatos.txt
+            # Rascunho e o autor dizendo "ainda nao". Fica de fora, senao o
+            # coordenador mergearia trabalho que o proprio dono marcou como
+            # inacabado. `--state open` nao filtra rascunho.
+            jq -r '.[] | select(.isDraft | not) | "\(.number) \(.headRefOid)"' \
+              fila/prs.json > fila/candidatos.txt
+            echo "PRs abertos: $(jq length fila/prs.json) | fora os rascunhos: $(grep -c . fila/candidatos.txt || true)"
           elif gh api "repos/$REPO/branches?per_page=100" --paginate \
                  --jq '.[] | "\(.name) \(.commit.sha)"' \
                  > fila/branches.txt 2> fila/erro2-nao-publicar.txt; then
@@ -341,57 +346,120 @@ jobs:
           fi
 
       # ----------------------------------------------------------------------
-      # 3. MERGEAR (so com credencial de escrita, e so em modo executar)
+      # 3. MERGEAR
       # ----------------------------------------------------------------------
+      # A CONDICAO E O CONTRARIO DO QUE PARECE NATURAL, E DE PROPOSITO.
+      #
+      # A primeira versao exigia `workflow_dispatch` com `modo=executar` para
+      # sequer entrar neste passo. O efeito era que o dono criaria o
+      # `LEILOAI_MERGE_PAT` e NADA MUDARIA: a passagem de 10 em 10 minutos
+      # continuaria so conferindo, para sempre, e o merge so aconteceria se
+      # alguem clicasse. Isso e o oposto do que este workflow existe para
+      # resolver, que e nao depender de ninguem estar presente.
+      #
+      # Entao a regra virou: ele entra sempre que houver proximo, e quem decide
+      # se mergeia ou nao e a EXISTENCIA DA CREDENCIAL, medida aqui dentro.
+      # `modo=conferir` no disparo manual continua valendo como ensaio, mesmo
+      # com o secret ja criado.
+      #
+      # O `secrets` nao existe como contexto em `if:` de passo, entao a
+      # verificacao mora no `run`. Isso tambem evita por o segredo num `env:` de
+      # job, que o entregaria a TODOS os passos, inclusive ao que decide, que e
+      # deliberadamente sem `env:`.
       - name: Mergear o proximo da fila
+        id: mergear
         if: >-
           steps.levantar.outputs.sem_credencial != 'true' &&
           steps.decidir.outputs.proximo != '' &&
-          github.event_name == 'workflow_dispatch' &&
-          inputs.modo == 'executar'
+          github.event_name != 'push' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.modo == 'conferir')
         env:
           GH_TOKEN: ${{ secrets.LEILOAI_MERGE_PAT }}
           PROX: ${{ steps.decidir.outputs.proximo }}
+          PROX_SHA: ${{ steps.decidir.outputs.proximo_sha }}
+          PEDIU_EXECUTAR: ${{ github.event_name == 'workflow_dispatch' && inputs.modo == 'executar' }}
         run: |
           set -euo pipefail
+
+          # SEM CREDENCIAL: duas saidas diferentes, porque sao dois casos.
+          # Pedido explicito que nao pode ser atendido e ERRO, e tem que doer.
+          # Passagem periodica sem credencial e o estado NORMAL de hoje: avisa
+          # uma vez e sai verde, senao vira um vermelho a cada 10 minutos, e
+          # vermelho de rotina e vermelho que ninguem le.
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::modo=executar pedido, mas o secret LEILOAI_MERGE_PAT nao existe neste repositorio. Crie um PAT fine-grained limitado a RenatoPassos1/leilao-watch com Contents: write e Pull requests: write, guarde como LEILOAI_MERGE_PAT, e rode de novo. Nao vou tentar mergear sem credencial propria."
+            RECADO="o secret LEILOAI_MERGE_PAT nao existe neste repositorio. Crie um PAT fine-grained limitado a RenatoPassos1/leilao-watch, com Contents: write e Pull requests: write e NADA ALEM, e guarde com: gh secret set LEILOAI_MERGE_PAT --repo RenatoPassos1/actions-engine. Assim que ele existir, esta mesma passagem passa a mergear sozinha, sem mudar uma linha deste arquivo."
+            if [ "${PEDIU_EXECUTAR:-false}" = "true" ]; then
+              echo "::error::modo=executar pedido, mas $RECADO"
+              exit 1
+            fi
+            echo "::notice::conferi e o proximo e o PR #$PROX (ponta $PROX_SHA), mas nao mergeei: $RECADO"
+            {
+              echo "### coordenador da fila: conferiu, nao mergeou"
+              echo ""
+              echo "- proximo: PR #$PROX (ponta \`$PROX_SHA\`)"
+              echo "- falta o secret \`LEILOAI_MERGE_PAT\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ESCOPO ERRADO FALHA COMO ESCOPO AUSENTE, E ISSO JA CUSTOU CARO.
+          # Um PAT fine-grained sem o toggle certo responde o mesmo
+          # "Resource not accessible by personal access token" que um PAT
+          # inexistente, e foi assim que a versao de leitura passou duas
+          # rodadas morrendo sem dizer o que faltava. Uma leitura barata antes
+          # do merge transforma isso numa frase acionavel.
+          if ! gh pr view "$PROX" --repo RenatoPassos1/leilao-watch --json number >/dev/null 2>&1; then
+            echo "::error::o secret LEILOAI_MERGE_PAT existe mas nao consegue nem LER o PR #$PROX. Confira, no PAT fine-grained: o repositorio RenatoPassos1/leilao-watch selecionado, Pull requests com acesso de Escrita (que ja inclui leitura), Contents com Escrita, e a validade nao expirada. Nao vou tentar mergear com credencial que nao le."
             exit 1
           fi
+
           # MERGE COMMIT, nunca squash: o portao do deploy anda --first-parent e
           # exige o veredito do SEGUNDO PAI de cada merge. Squash apaga esse pai
           # e a entrega passaria a ser recusada na VPS, depois de mergeada.
           # SAIDA DESCARTADA DE PROPOSITO. O `gh pr merge` imprime o TITULO do
           # PR, e titulo nomeia o que o commit toca: "fix(coleta): o campo do
-          # Superbid...", "feat(caixa): ...". Isso e nome de FONTE RASPADA num
-          # log publico, legivel sem login. O numero do PR basta para auditar,
-          # e ele nao diz nada sobre o conteudo.
+          # <fonte>...". Isso e nome de FONTE RASPADA num log publico, legivel
+          # sem login. O numero do PR basta para auditar, e ele nao diz nada
+          # sobre o conteudo.
           if gh pr merge "$PROX" --repo RenatoPassos1/leilao-watch --merge >/dev/null 2>&1; then
-            echo "::notice::PR #$PROX mergeado"
+            echo "::notice::PR #$PROX mergeado (ponta $PROX_SHA)"
+            echo "mergeou=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### coordenador da fila: mergeou"
+              echo ""
+              echo "- PR #$PROX, ponta \`$PROX_SHA\`"
+            } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::error::falhei ao mergear o PR #$PROX. O detalhe NAO vai para este log (publico); veja o PR no repositorio privado."
             exit 1
           fi
 
+      # ----------------------------------------------------------------------
+      # 4. RELATAR, QUANDO NAO HOUVE MERGE A FAZER
+      # ----------------------------------------------------------------------
+      # Cobre os casos em que o passo 3 nem foi tentado: ensaio pedido a mao, e
+      # fila lida por BRANCH, onde nao existe numero de PR para mergear.
       - name: Dizer o que faria, quando so esta conferindo
         if: >-
           steps.levantar.outputs.sem_credencial != 'true' &&
           steps.decidir.outputs.proximo_sha != '' &&
-          !(github.event_name == 'workflow_dispatch' && inputs.modo == 'executar' && steps.decidir.outputs.proximo != '')
+          (steps.decidir.outputs.proximo == '' ||
+           github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && inputs.modo == 'conferir'))
         env:
           PROX: ${{ steps.decidir.outputs.proximo }}
           PROX_SHA: ${{ steps.decidir.outputs.proximo_sha }}
           FONTE: ${{ steps.levantar.outputs.fonte }}
         run: |
           if [ -n "${PROX:-}" ]; then
-            echo "::notice::modo conferir: mergearia o PR #$PROX (ponta $PROX_SHA). Para valer, rode com modo=executar (exige o secret LEILOAI_MERGE_PAT)."
+            echo "::notice::nao mergeei de proposito (ensaio pedido a mao, ou push no proprio arquivo do workflow): mergearia o PR #$PROX, ponta $PROX_SHA."
           else
-            echo "::notice::modo conferir por $FONTE: a fila foi lida e ordenada com dado real, e o proximo e a ponta $PROX_SHA. O merge nao esta disponivel porque exige numero de PR, e a credencial de leitura nao alcanca pull request."
+            echo "::notice::conferi por $FONTE: a fila foi lida e ordenada com dado real, e o proximo e a ponta $PROX_SHA. O merge nao esta disponivel porque exige numero de PR, e a credencial de leitura nao alcanca pull request."
           fi
           {
             echo "### coordenador da fila: conferiu"
             echo ""
             echo "- fonte da lista: \`$FONTE\`"
             echo "- proximo: ponta \`$PROX_SHA\`${PROX:+ (PR #$PROX)}"
-            echo "- merge: ${PROX:+disponivel com modo=executar}${PROX:-indisponivel sem permissao de pull request}"
+            echo "- merge: ${PROX:+nao tentado de proposito neste gatilho}${PROX:-indisponivel sem permissao de pull request}"
           } >> "$GITHUB_STEP_SUMMARY"
