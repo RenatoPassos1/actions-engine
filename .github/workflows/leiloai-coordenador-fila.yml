@@ -146,10 +146,18 @@ on:
       - ".github/workflows/leiloai-coordenador-fila.yml"
 
 permissions:
-  # Este workflow nao escreve NADA neste repositorio. Quem cria ref de
-  # aprovacao e o `leiloai-ci-aprovado.yml`; quem mergeia e o repositorio
-  # privado, com credencial propria.
+  # Este workflow nao escreve NADA neste repositorio, com uma excecao: quem
+  # cria ref de aprovacao e o `leiloai-ci-aprovado.yml`; quem mergeia e o
+  # repositorio privado, com credencial propria.
   contents: read
+  # SO para acordar o `leiloai-ci-publico.yml` NESTE repositorio apos um
+  # merge, com `github.token` (nao um PAT novo). O mesmo padrao ja roda no
+  # job `status` do proprio ci-publico.yml, que acorda o ci-aprovado.yml: um
+  # workflow_dispatch explicito, via API, no MESMO repositorio, nao e o
+  # "evento encadeado" que o GITHUB_TOKEN automatico recusa (essa recusa vale
+  # para eventos implicitos tipo push/pull_request, nao para uma chamada
+  # explicita de `gh workflow run`).
+  actions: write
 
 concurrency:
   # Sem SHA no grupo, de proposito, e ao contrario do CI: duas passagens
@@ -497,6 +505,17 @@ jobs:
             if gh pr merge "$numero" --repo RenatoPassos1/leilao-watch --merge >/dev/null 2>&1; then
               echo "::notice::PR #$numero mergeado (ponta $curto)"
               echo "mergeou=true" >> "$GITHUB_OUTPUT"
+              # O SHA que o CI precisa validar e o MERGE COMMIT resultante
+              # (novo HEAD de feat/landing), nao a ponta do PR: o merge commit
+              # e o que carrega os dois pais que o portao do deploy exige.
+              # Falha em ler isso NAO derruba o merge que ja aconteceu; so
+              # deixa o passo seguinte sem SHA para disparar (ele cai no cron).
+              SHA_MERGEADO=$(gh api repos/RenatoPassos1/leilao-watch/branches/feat/landing --jq .commit.sha 2>/dev/null || true)
+              if printf '%s' "$SHA_MERGEADO" | grep -qE '^[0-9a-f]{40}$'; then
+                echo "sha_mergeado=$SHA_MERGEADO" >> "$GITHUB_OUTPUT"
+              else
+                echo "::warning::mergeei o PR #$numero mas nao consegui ler o SHA resultante de feat/landing; o disparo do CI fica para o proximo ciclo do cron"
+              fi
               {
                 echo "### coordenador da fila: mergeou"
                 echo ""
@@ -520,7 +539,46 @@ jobs:
           fi
 
       # ----------------------------------------------------------------------
-      # 4. RELATAR, QUANDO NAO HOUVE MERGE A FAZER
+      # 4. ACORDAR O CI, QUANDO MERGEOU
+      # ----------------------------------------------------------------------
+      # MEDIDO em 25/08/2026: quando o merge sai daqui (nuvem) em vez do gancho
+      # local do `finish`, ninguem pede o CI real. O veredito ficava esperando
+      # o cron do proprio `leiloai-ci-publico.yml` (`*/5`, mas o GitHub
+      # estrangula alta frequencia sob a carga deste repositorio: mediana de
+      # 34,6 min, maximo de 55,3, contra ~17 min do caminho normal ate
+      # producao). Cada vez que isso aconteceu nesta sessao, o disparo teve
+      # que ser manual: `gh workflow run leiloai-ci-publico.yml -f sha=<sha>
+      # -f mode=full`.
+      #
+      # O padrao replicado aqui ja roda em producao no job `status` do proprio
+      # `leiloai-ci-publico.yml`, que acorda o `leiloai-ci-aprovado.yml` do
+      # mesmo jeito: `github.token` (nao PAT novo) com `actions: write`, um
+      # `workflow_dispatch` explicito via `gh workflow run` no MESMO
+      # repositorio. Isso NAO e o "evento encadeado" que o GITHUB_TOKEN
+      # automatico recusa disparar (essa recusa e so para eventos implicitos
+      # tipo push/pull_request insinuados por uma acao do proprio Actions);
+      # e uma chamada de API explicita, que funciona normalmente.
+      #
+      # Falha aqui NUNCA e erro do job: o merge ja aconteceu e e irreversivel
+      # por este workflow. Se o disparo falhar, o cron cobre em ate ~35 min,
+      # o mesmo caminho que ja existia antes desta mudanca.
+      - name: Acordar o CI publico para a ponta recem-mergeada
+        if: steps.mergear.outputs.sha_mergeado != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.mergear.outputs.sha_mergeado }}
+        run: |
+          set -euo pipefail
+          if gh workflow run leiloai-ci-publico.yml \
+               --repo "${{ github.repository }}" \
+               -f sha="$SHA" -f mode=full >/dev/null 2>&1; then
+            echo "::notice::CI publico disparado para a ponta ${SHA:0:8} recem-mergeada"
+          else
+            echo "::warning::nao consegui disparar o CI publico para ${SHA:0:8}; o cron (*/5, mediana ~35 min) cobre isto"
+          fi
+
+      # ----------------------------------------------------------------------
+      # 5. RELATAR, QUANDO NAO HOUVE MERGE A FAZER
       # ----------------------------------------------------------------------
       # Cobre os casos em que o passo 3 nem foi tentado: ensaio pedido a mao, e
       # fila lida por BRANCH, onde nao existe numero de PR para mergear.
