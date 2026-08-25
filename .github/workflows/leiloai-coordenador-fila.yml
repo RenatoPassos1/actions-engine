@@ -452,10 +452,14 @@ jobs:
               # todo PR associado ao commit, inclusive fechado, de outra base ou
               # rascunho. Mergear qualquer um seria mergear coisa diferente da
               # que a fila julgou.
-              numero=$(gh api "repos/RenatoPassos1/leilao-watch/commits/$sha/pulls" \\
-                         --jq 'map(select(.state=="open" and .draft==false
-                                          and .base.ref=="feat/landing"))
-                               | .[0].number // empty' 2>/dev/null || true)
+              # UMA LINHA SO, sem continuacao. A versao anterior quebrava a
+              # linha com `\\`, que em bash e uma barra literal e nao
+              # continuacao: o `--jq` nunca chegava ao `gh`, e a variavel ficava
+              # vazia. Medido na rodada 32850181048: a nuvem disse "16fc7646 nao
+              # tem PR aberto" com o PR #402 OPEN e MERGEABLE, e o mesmo filtro
+              # rodado a mao devolvia 402.
+              filtro='map(select(.state=="open" and .draft==false and .base.ref=="feat/landing")) | .[0].number // empty'
+              numero=$(gh api "repos/RenatoPassos1/leilao-watch/commits/$sha/pulls" --jq "$filtro" 2>/dev/null || true)
             fi
 
             if [ -z "${numero:-}" ]; then
@@ -464,8 +468,7 @@ jobs:
               continue
             fi
 
-            estado=$(gh pr view "$numero" --repo RenatoPassos1/leilao-watch \\
-                       --json mergeable,state --jq '.state + " " + .mergeable' 2>/dev/null || true)
+            estado=$(gh pr view "$numero" --repo RenatoPassos1/leilao-watch --json mergeable,state --jq '.state + " " + .mergeable' 2>/dev/null || true)
             if [ -z "$estado" ]; then
               echo "::error::o secret LEILOAI_MERGE_PAT existe mas nao consegue nem LER o PR #$numero. Confira, no PAT fine-grained: o repositorio RenatoPassos1/leilao-watch selecionado, Pull requests com acesso de Escrita (que ja inclui leitura), Contents com Escrita, e a validade nao expirada. Nao vou tentar mergear com credencial que nao le."
               exit 1
