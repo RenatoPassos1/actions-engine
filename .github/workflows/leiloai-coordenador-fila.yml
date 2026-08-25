@@ -448,10 +448,43 @@ jobs:
           # inexistente, e foi assim que a versao de leitura passou duas
           # rodadas morrendo sem dizer o que faltava. Uma leitura barata antes
           # do merge transforma isso numa frase acionavel.
-          if ! gh pr view "$PROX" --repo RenatoPassos1/leilao-watch --json number >/dev/null 2>&1; then
+          estado=$(gh pr view "$PROX" --repo RenatoPassos1/leilao-watch \
+                     --json mergeable,state --jq '.state + " " + .mergeable' 2>/dev/null || true)
+          if [ -z "$estado" ]; then
             echo "::error::o secret LEILOAI_MERGE_PAT existe mas nao consegue nem LER o PR #$PROX. Confira, no PAT fine-grained: o repositorio RenatoPassos1/leilao-watch selecionado, Pull requests com acesso de Escrita (que ja inclui leitura), Contents com Escrita, e a validade nao expirada. Nao vou tentar mergear com credencial que nao le."
             exit 1
           fi
+
+          # "AINDA NAO DA" NAO E "FALHEI", E CONFUNDIR OS DOIS FAZ ESTE WORKFLOW
+          # CRIAR ALARME FALSO.
+          # A primeira versao mandava direto para o `gh pr merge` e tratava
+          # qualquer recusa como erro. Em 25/08/2026 o PR #390 estava
+          # CONFLICTING (duas sessoes acrescentaram no fim do mesmo ledger), e o
+          # resultado foram DUAS rodadas vermelhas por algo que era o sistema
+          # funcionando: conflito se resolve com rebase do autor, nao com
+          # insistencia do coordenador. O coordenador LOCAL sempre tratou isso
+          # como "bloqueado", e as duas metades da mesma ferramenta nao podem
+          # discordar sobre o que e falha.
+          #
+          # UNKNOWN e caso a parte: o GitHub calcula `mergeable` em segundo
+          # plano, e logo apos um merge na base os PRs seguintes respondem
+          # UNKNOWN. Tratar como recusa faria o coordenador parar sozinho a cada
+          # merge; a passagem seguinte resolve.
+          case "$estado" in
+            "OPEN MERGEABLE") : ;;
+            "OPEN UNKNOWN")
+              echo "::notice::PR #$PROX ainda com mergeable=UNKNOWN (o GitHub calcula em segundo plano). Nada feito nesta rodada; a proxima resolve."
+              exit 0 ;;
+            "OPEN CONFLICTING")
+              echo "::notice::PR #$PROX esta em conflito com a base. Isto NAO e falha do coordenador: quem resolve e o autor, com rebase, e depois um novo finish (o veredito e do SHA). Nada mergeado nesta rodada."
+              exit 0 ;;
+            "MERGED "*|"CLOSED "*)
+              echo "::notice::PR #$PROX ja nao esta aberto ($estado). A fila sera reconciliada; nada a fazer."
+              exit 0 ;;
+            *)
+              echo "::notice::PR #$PROX em estado que nao autoriza merge ($estado). Nada feito nesta rodada."
+              exit 0 ;;
+          esac
 
           # MERGE COMMIT, nunca squash: o portao do deploy anda --first-parent e
           # exige o veredito do SEGUNDO PAI de cada merge. Squash apaga esse pai
