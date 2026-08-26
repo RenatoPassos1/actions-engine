@@ -287,9 +287,68 @@ jobs:
           # A action escreve a chave com quebra de linha final; o ssh exige.
           printf '\n' >> "$ARQ_CHAVE"
 
-          curl -sS --max-time 20 https://api.github.com/meta > /tmp/gh-meta.json
-          jq -r '.ssh_keys[] | "github.com " + .' /tmp/gh-meta.json > "$KH"
+          # ------------------------------------------------------------------
+          # CHAVES DE HOST FIXAS, com a API como CONFERENCIA e nao como fonte.
+          #
+          # Antes daqui saia um `curl https://api.github.com/meta` sem
+          # autenticacao e sem retry, e o `jq` logo abaixo consumia a resposta
+          # direto. A API publica do GitHub limita a 60 requisicoes por hora
+          # POR IP, e runner hospedado compartilha IP: quando vinha
+          # `403 rate limit`, o corpo era `{"message": "..."}`, `.ssh_keys`
+          # era null, e o `jq` estourava com "Cannot iterate over null".
+          #
+          # Medido em 26/08/2026: DUAS corridas seguidas do LeiloAI morreram
+          # assim, `exit 5`, ANTES do primeiro estagio.
+          #
+          # O custo nao e o minuto perdido: e que o veredito publicado no SHA
+          # fica `failure`, indistinguivel de codigo quebrado, e o portao do
+          # `puxar-deploy.sh` recusa publicar com a MESMA mensagem que usa para
+          # "CI ainda nao terminou". Uma falha de rede de terceiro virava, na
+          # leitura de quem investiga, um bug do produto.
+          #
+          # Agora as chaves vivem AQUI. Sao publicas, estaveis e verificaveis
+          # (mesmo conteudo de `https://api.github.com/meta`), e saem do
+          # caminho critico de rede.
+          #
+          # A API CONTINUA SENDO CHAMADA, mas so para CONFERIR: se responder e
+          # trouxer chave fora da lista fixa, o passo avisa e usa a resposta
+          # dela, porque isso e o sinal de rotacao (o GitHub trocou a chave RSA
+          # em marco de 2023 depois de expo-la). Se nao responder, ou responder
+          # sem `ssh_keys`, seguimos com a lista fixa em vez de derrubar a
+          # corrida.
+          #
+          # Fixar SEM conferir trocaria uma falha barulhenta por uma calada:
+          # rotacao passaria despercebida ate o clone falhar por host key
+          # mismatch. Por isso a conferencia continua, e so ela pode alterar.
+          # ------------------------------------------------------------------
+          cat > "$KH" <<'CHAVES_DO_GITHUB'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          CHAVES_DO_GITHUB
+          # O heredoc acima e indentado para caber no YAML; o ssh nao aceita
+          # espaco na frente da linha do known_hosts. O `sed` desfaz.
+          sed -i 's/^[[:space:]]*//' "$KH"
+
+          # A conferencia NAO pode derrubar a corrida: o `if` no curl impede
+          # que `set -e` mate o passo, e o bloco so age quando a resposta tem
+          # `ssh_keys` de verdade.
+          if curl -sS --max-time 20 https://api.github.com/meta > /tmp/gh-meta.json 2>/dev/null; then
+            if jq -e '.ssh_keys | arrays and length > 0' /tmp/gh-meta.json >/dev/null 2>&1; then
+              jq -r '.ssh_keys[] | "github.com " + .' /tmp/gh-meta.json > /tmp/kh-api
+              if ! diff -q <(sort "$KH") <(sort /tmp/kh-api) >/dev/null 2>&1; then
+                echo "::warning::as chaves de host do github mudaram; usando as da API, e atualize a lista fixa deste workflow"
+                cp /tmp/kh-api "$KH"
+              fi
+              rm -f /tmp/kh-api
+            else
+              echo "api.github.com/meta sem ssh_keys (rate limit?); seguindo com a lista fixa"
+            fi
+          else
+            echo "api.github.com/meta indisponivel; seguindo com a lista fixa"
+          fi
           rm -f /tmp/gh-meta.json
+
           [ -s "$KH" ] || { echo "::error::nao obtive as chaves de host do github"; exit 1; }
 
           export GIT_SSH_COMMAND="ssh -i $ARQ_CHAVE -o IdentitiesOnly=yes -o UserKnownHostsFile=$KH -o StrictHostKeyChecking=yes -o BatchMode=yes"
