@@ -76,3 +76,16 @@ jobs:
       - name: Entrada do CI publico recusa o que precisa recusar
         if: always()
         run: bash .github/scripts/testar-entrada-ci-publico.sh
+
+      # A GUARDA DO VEREDITO DO CI PUBLICO.
+      #
+      # O job `status` do `leiloai-ci-publico.yml` so pode publicar veredito
+      # quando `resolver.outputs.precisa == 'true'`, a MESMA guarda que faz o
+      # `compute` rodar. Se alguem relaxar o `if` do `status` para so
+      # `always()`, um run com compute pulado passaria a publicar `failure`
+      # sobre um SHA ja verde, e o deploy travaria ~35 min sem erro visivel. O
+      # teste deriva a guarda do proprio `compute` e prova, com um mutante, que
+      # sabe ficar vermelho.
+      - name: Guarda do veredito do CI publico (status nao aprova sem compute)
+        if: always()
+        run: bash .github/scripts/testar-guarda-status-ci-publico.sh
