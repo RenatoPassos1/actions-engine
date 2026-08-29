@@ -77,6 +77,18 @@ on:
     # acontecer, entao vale ser curta: o build em si ja leva 9 minutos.
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      sha:
+        # O ALVO PASSA A SER DITO, EM VEZ DE ADIVINHADO.
+        #
+        # Ate 29/08/2026 este workflow SEMPRE lia a ponta da branch. Com varias
+        # sessoes mergeando, a ponta anda entre o CI ficar verde e a aprovacao
+        # rodar, e ele acabava julgando uma revisao diferente da que acabou de
+        # ser medida. Vazio mantem o comportamento antigo, que e o certo para o
+        # `schedule` (reconciliacao: ali o alvo E a ponta).
+        description: "SHA exato a aprovar (vazio = ponta da branch)"
+        required: false
+        type: string
   push:
     paths:
       - ".github/workflows/leiloai-ci-aprovado.yml"
@@ -108,12 +120,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
           BRANCH: ${{ matrix.branch }}
+          ENTRADA_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           REPO=RenatoPassos1/leilao-watch
           mkdir -p ci
 
-          SHA=$(gh api "repos/$REPO/branches/$BRANCH" --jq .commit.sha)
+          # ALVO: o que foi PEDIDO, ou a ponta quando ninguem pediu nada.
+          SHA="${ENTRADA_SHA:-}"
+          if [ -n "$SHA" ]; then
+            printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || {
+              echo "::error::sha invalido: 40 hex minusculos, e nada mais"; exit 1; }
+            echo "alvo veio por parametro (o CI disse qual revisao mediu): $SHA"
+          else
+            SHA=$(gh api "repos/$REPO/branches/$BRANCH" --jq .commit.sha)
+            echo "alvo e a ponta de $BRANCH (reconciliacao): $SHA"
+          fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "$BRANCH -> $SHA"
 

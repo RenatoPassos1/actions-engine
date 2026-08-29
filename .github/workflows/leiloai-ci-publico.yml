@@ -215,6 +215,64 @@ jobs:
   # ==========================================================================
   # ARM porque a VPS e ARM (secao 42): validar em x86 o que roda em aarch64 e
   # declarar equivalencia que ninguem mediu.
+
+      # ======================================================================
+      # PENDING: "ninguem pediu" deixa de ser igual a "esta rodando"
+      # ======================================================================
+      #
+      # Ate 29/08/2026 este workflow publicava UM unico status, o veredito
+      # final. Consequencia: a AUSENCIA de status colapsava tres estados
+      # diferentes, e a diferenca entre eles muda o que fazer:
+      #
+      #   NAO_PEDIDO ......... alguem precisa pedir
+      #   PENDENTE ........... so esperar
+      #   PEDIU E MORREU ..... investigar
+      #
+      # O terceiro custou duas horas: um run falhou em `Resolver SHA` (a branch
+      # nao estava no remoto), `compute` e `status` ficaram `skipped`, nenhum
+      # status foi publicado, e de fora aquilo era indistinguivel de "ainda
+      # rodando". No mesmo dia um vigia pediu CI para um SHA que JA estava
+      # sendo medido, e uma sessao concluiu que "ninguem pede CI".
+      #
+      # CONTEXTO IRMAO, E NAO O MESMO. A primeira versao publicava o `pending`
+      # em `ci/actions-engine`, o contexto do VEREDITO, e criou uma armadilha
+      # pior do que a que veio resolver. Tres consequencias, todas medidas:
+      #
+      #   - o `resolver` conta `[.statuses[] | select(.context == $CONTEXTO)]`
+      #     e NAO olha o estado, entao um `pending` virava "ja tem veredito
+      #     publicado" e o proprio CI recusava remedir aquele SHA;
+      #   - o vigia externo so age em `ausente` ou `success`, entao um SHA que
+      #     morresse no meio ficava `pending` PARA SEMPRE, invisivel para a rede
+      #     de seguranca: o estado "pediu e morreu" voltava com outra roupa;
+      #   - `forcar=true`, que o `agentctl` usa SEMPRE ao revalidar, apagava o
+      #     veredito vigente antes de medir de novo, tornando destrutiva uma
+      #     operacao que era de leitura.
+      #
+      # Em contexto irmao nada disso acontece: o veredito nunca e sobrescrito, o
+      # `resolver` continua contando so o que e veredito, e quem quiser saber se
+      # ha execucao em voo pergunta pelo `/pendente`.
+      #
+      # Falhar aqui NAO reprova o CI: pending e informacao, e perder informacao
+      # nao pode custar a medicao.
+      - name: Publicar PENDING no SHA exato
+        if: steps.alvo.outputs.precisa == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
+          SHA: ${{ steps.alvo.outputs.sha }}
+        run: |
+          set -uo pipefail
+          if [ "$PUBLICAR_STATUS" != "true" ]; then
+            echo "SHADOW: nao publico pending"; exit 0
+          fi
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
+          gh api -X POST "repos/$REPO_PRIVADO/statuses/$SHA" \
+            -f state=pending \
+            -f context="$CONTEXTO/pendente" \
+            -f description="CI em execucao (ARM)" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            > /dev/null \
+            && echo "pending publicado para $SHA" \
+            || echo "::warning::nao consegui publicar pending; o veredito final ainda sai"
   compute:
     name: compute (ARM, sem segredo)
     needs: resolver
@@ -551,11 +609,44 @@ jobs:
           # Acordar a aprovacao imediatamente. Sem isto, o veredito ficaria
           # esperando o proximo ciclo do `schedule`, que o GitHub entrega com
           # mediana de 34,6 min: seria pagar a mesma espera duas vezes.
+          # ====================================================================
+          # ACORDAR A APROVACAO: COM O SHA EXATO, E SEM SER BEST-EFFORT
+          # ====================================================================
+          #
+          # Duas mudancas em 29/08/2026, as duas com custo medido.
+          #
+          # 1. PASSA O SHA. Antes o aprovador SEMPRE lia a ponta da branch, e
+          #    com varias sessoes mergeando a ponta anda entre o CI ficar verde
+          #    e a aprovacao rodar: ele julgava outra revisao. Agora julga a
+          #    que acabou de ser medida.
+          #
+          # 2. DEIXA DE SER `|| echo "::notice::"`. Best-effort faz falha e
+          #    sucesso ficarem IDENTICOS no log, e a conta chega ~35 min depois,
+          #    em outro lugar, como "deploy parado". Medido em 29/08/2026: num
+          #    intervalo de 1h20, um vigia externo precisou acordar a aprovacao
+          #    DUAS vezes porque este disparo falhou calado.
+          #
+          # Tres tentativas, e REPROVA o passo se nenhuma passar. O `schedule`
+          # continua, mas como RECONCILIACAO: deixa de ser o mecanismo do
+          # caminho feliz.
           if [ "$ESTADO" = "success" ]; then
-            GH_TOKEN="$TOKEN_DISPARO" gh workflow run leiloai-ci-aprovado.yml \
-              --repo "${{ github.repository }}" >/dev/null 2>&1 \
-              && echo "aprovacao disparada" \
-              || echo "::notice::nao consegui disparar a aprovacao; ela roda no proximo ciclo"
+            disparou=0
+            for tentativa in 1 2 3; do
+              if GH_TOKEN="$TOKEN_DISPARO" gh workflow run leiloai-ci-aprovado.yml \
+                   --repo "${{ github.repository }}" -f sha="$SHA" >/dev/null 2>&1; then
+                echo "aprovacao disparada para $SHA (tentativa $tentativa)"
+                disparou=1
+                break
+              fi
+              echo "::warning::tentativa $tentativa de acordar a aprovacao falhou"
+              sleep $((tentativa * 5))
+            done
+            if [ "$disparou" -ne 1 ]; then
+              echo "::error::CI VERDE e a aprovacao NAO foi disparada em 3 tentativas."
+              echo "::error::O deploy ficaria esperando o schedule (mediana medida: ~35 min)."
+              echo "::error::Remedio: gh workflow run leiloai-ci-aprovado.yml --repo ${{ github.repository }} -f sha=$SHA"
+              exit 1
+            fi
           fi
 
           # Provenance (secao 49.4), sem source intel.
