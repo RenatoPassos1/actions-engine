@@ -1,0 +1,42 @@
+name: "LeilôAI: testes do seletor da fila"
+
+# Roda os testes de `.github/scripts/testar-fila-selecionar.sh` quando o
+# coordenador da fila ou o seletor mudam. Sem segredo, sem rede alem do
+# checkout deste repositorio: a fixture e um repositorio git de mentira com 200
+# branches historicos e 3 entregas vivas.
+#
+# O script roda DUAS passadas e so passa se as duas disserem o esperado: o
+# seletor novo passa em tudo, e o controle negativo (regra antiga das 80
+# primeiras, e uma mutacao do workflow) reprova em tudo menos no teste da
+# intersecao, que nao mudou. Teste que passa com o defeito nao prova nada.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/leiloai-coordenador-fila.yml"
+      - ".github/workflows/leiloai-coordenador-fila-teste.yml"
+      - ".github/scripts/leiloai-fila-selecionar.sh"
+      - ".github/scripts/testar-fila-selecionar.sh"
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/leiloai-coordenador-fila.yml"
+      - ".github/workflows/leiloai-coordenador-fila-teste.yml"
+      - ".github/scripts/leiloai-fila-selecionar.sh"
+      - ".github/scripts/testar-fila-selecionar.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testar:
+    name: seletor da fila sem inanicao
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Testes, com controle negativo
+        run: bash .github/scripts/testar-fila-selecionar.sh
