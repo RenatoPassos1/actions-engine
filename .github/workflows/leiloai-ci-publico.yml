@@ -560,8 +560,9 @@ jobs:
     if: always() && needs.resolver.outputs.precisa == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # `actions: write` e so para acordar o workflow de aprovacao NESTE
-    # repositorio. Ele nao alcanca o repositorio privado, que e falado pelo PAT.
+    # `actions: write` e so para acordar a aprovacao e o coordenador da fila
+    # NESTE repositorio. Ele nao alcanca o repositorio privado, que e falado
+    # pelo PAT.
     permissions:
       actions: write
     steps:
@@ -645,6 +646,49 @@ jobs:
               echo "::error::CI VERDE e a aprovacao NAO foi disparada em 3 tentativas."
               echo "::error::O deploy ficaria esperando o schedule (mediana medida: ~35 min)."
               echo "::error::Remedio: gh workflow run leiloai-ci-aprovado.yml --repo ${{ github.repository }} -f sha=$SHA"
+              exit 1
+            fi
+          fi
+
+          # ====================================================================
+          # ACORDAR O COORDENADOR DA FILA: CI VERDE E O MOMENTO EM QUE ELE PODE
+          # MERGEAR, E ERA O UNICO MOMENTO EM QUE NINGUEM O CHAMAVA
+          # ====================================================================
+          #
+          # Medido em 14/09/2026 no leilao-watch#698:
+          #
+          #     04:29:48  `agentctl finish` acorda o coordenador
+          #               -> CI da branch ainda nao existe, nada a mergear
+          #     04:46:03  CI verde neste SHA; a aprovacao e acordada acima,
+          #               o coordenador NAO
+          #     05:23     `schedule` do coordenador: o GitHub nao entregou
+          #     06:28:21  `schedule` entregue; merge as 06:28:39
+          #
+          # Uma hora e quarenta e dois minutos com a entrega pronta e parada. O
+          # `finish` acorda o coordenador ANTES do CI ficar verde, entao a
+          # passagem dele nunca encontra nada; a proxima so vinha do cron
+          # horario, que o GitHub estrangula. O cron fica como reconciliacao.
+          #
+          # Acordar sempre, e nao so para SHA de branch enfileirada: para o
+          # merge commit da ponta ele pode mergear a PROXIMA da fila. Chamada a
+          # mais e inofensiva: o coordenador decide pelos proprios portoes
+          # (PR aberto, CI verde, ordem), e o `concurrency` dele serializa.
+          if [ "$ESTADO" = "success" ]; then
+            acordou=0
+            for tentativa in 1 2 3; do
+              if GH_TOKEN="$TOKEN_DISPARO" gh workflow run leiloai-coordenador-fila.yml \
+                   --repo "${{ github.repository }}" -f modo=executar >/dev/null 2>&1; then
+                echo "coordenador da fila acordado apos CI verde em $SHA (tentativa $tentativa)"
+                acordou=1
+                break
+              fi
+              echo "::warning::tentativa $tentativa de acordar o coordenador falhou"
+              sleep $((tentativa * 5))
+            done
+            if [ "$acordou" -ne 1 ]; then
+              echo "::error::CI VERDE e o coordenador da fila NAO foi acordado em 3 tentativas."
+              echo "::error::A entrega ficaria parada ate o schedule horario (medido: 1h42 em 14/09/2026)."
+              echo "::error::Remedio: gh workflow run leiloai-coordenador-fila.yml --repo ${{ github.repository }} -f modo=executar"
               exit 1
             fi
           fi
