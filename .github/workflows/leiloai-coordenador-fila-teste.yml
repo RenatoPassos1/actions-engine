@@ -17,6 +17,8 @@ on:
       - ".github/workflows/leiloai-coordenador-fila-teste.yml"
       - ".github/scripts/leiloai-fila-selecionar.sh"
       - ".github/scripts/testar-fila-selecionar.sh"
+      - ".github/scripts/leiloai-reconciliar-ponta.sh"
+      - ".github/scripts/testar-reconciliar-ponta.sh"
   push:
     branches: ["main"]
     paths:
@@ -24,6 +26,8 @@ on:
       - ".github/workflows/leiloai-coordenador-fila-teste.yml"
       - ".github/scripts/leiloai-fila-selecionar.sh"
       - ".github/scripts/testar-fila-selecionar.sh"
+      - ".github/scripts/leiloai-reconciliar-ponta.sh"
+      - ".github/scripts/testar-reconciliar-ponta.sh"
   workflow_dispatch:
 
 permissions:
@@ -38,5 +42,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
         with:
           persist-credentials: false
-      - name: Testes, com controle negativo
+      - name: Testes do seletor da fila, com controle negativo
         run: bash .github/scripts/testar-fila-selecionar.sh
+      - name: Testes da reconciliacao da ponta, com controle negativo
+        run: bash .github/scripts/testar-reconciliar-ponta.sh
