@@ -281,8 +281,15 @@ else
 fi
 
 # test_pr_head_ci_state_and_merge_sha_ci_state_are_not_conflated
+# A negativa e ANCORADA NA LINHA DO `select`, e nao no arquivo inteiro,
+# desde 16/09/2026: o passo de reconciliacao da ponta le legitimamente o
+# contexto `ci/actions-engine` do SHA da PONTA, que e outra pergunta.
+# Proibir a string no arquivo todo transformaria este teste em "ninguem
+# pode citar o contexto", que nao e a regra; a regra e que a
+# ELEGIBILIDADE nao pode olhar o CI. A mutacao do controle negativo poe
+# a string exatamente dentro do `select`, entao ela continua sendo pega.
 if printf '%s' "$CODIGO" | grep -q 'select(.fila != null and .fila.state == "success")' \
-   && ! printf '%s' "$CODIGO" | grep -q 'ci/actions-engine' \
+   && ! printf '%s' "$CODIGO" | grep -E 'select\(\.fila' | grep -q 'ci/actions-engine' \
    && printf '%s' "$CODIGO" | grep -q 'SHA: \${{ steps.mergear.outputs.sha_mergeado }}'; then
   passou "workflow: elegibilidade continua sendo coordenacao/fila da ENTREGA, e o CI disparado e o do MERGE commit"
 else

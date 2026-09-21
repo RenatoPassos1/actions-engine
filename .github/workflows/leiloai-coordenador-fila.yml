@@ -224,7 +224,9 @@ jobs:
       - name: Buscar o seletor da fila
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
         with:
-          sparse-checkout: .github/scripts/leiloai-fila-selecionar.sh
+          sparse-checkout: |
+            .github/scripts/leiloai-fila-selecionar.sh
+            .github/scripts/leiloai-reconciliar-ponta.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -745,4 +747,175 @@ jobs:
             echo "- fonte da lista: \`$FONTE\`"
             echo "- proximo: ponta \`$PROX_SHA\`${PROX:+ (PR #$PROX)}"
             echo "- merge: ${PROX:+nao tentado de proposito neste gatilho}${PROX:-indisponivel sem permissao de pull request}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----------------------------------------------------------------------
+      # 6. RECONCILIAR A PONTA: o buraco que o passo 4 nao cobre
+      # ----------------------------------------------------------------------
+      # O passo 4 continua igual, e a condicao dele esta CERTA: ele e o caminho
+      # rapido logo depois de um merge feito por ESTE workflow. O que ele nao
+      # alcanca e o resto, e o resto e a maioria.
+      #
+      # MEDIDO em 16/09/2026, o dia inteiro:
+      #
+      #   pontas novas em feat/landing (first-parent) ...... 41
+      #   com refs/ci-aprovado/<sha> no actions-engine ..... 33
+      #   disparos de ci-publico por github-actions[bot] ... 23   (o passo 4)
+      #   disparos de ci-publico por RenatoPassos1 ......... 74   (a mao)
+      #   disparos de ci-publico por schedule ..............  3   (o cron */5)
+      #   rodadas do coordenador por schedule ..............  2   (o cron 23 *)
+      #
+      # Quem sustentava o pipeline eram os 74 disparos manuais. Nas 5 rodadas
+      # em que o passo 4 apareceu `skipped` (35128776513, 35128672286,
+      # 35127778432, 35127354939, 35127270257), o coordenador nao mergeou nada:
+      # as elegiveis estavam CONFLICTING ou sem PR aberto. A condicao nao errou;
+      # a cobertura e que parava no proprio merge.
+      #
+      # O `ci-publico` ja tem esta reconciliacao por dentro do caminho
+      # `schedule` (le a ponta, sai calado se o SHA ja tem veredito), e ela e
+      # por PONTA e nao por commit, entao nao satura o `ghrunner`. O que falha e
+      # a ENTREGA do agendamento: 3 de 288. Aqui a mesma reconciliacao ganha a
+      # cadencia que existe de verdade, porque o `agentctl finish` e o proprio
+      # `ci-publico` dispatcham este workflow ~100 vezes por dia.
+      #
+      # SO EM CONTEXTO QUE EXECUTA. `push` no proprio arquivo e `modo=conferir`
+      # sao ensaio, e ensaio nao produz efeito colateral em lugar nenhum.
+      #
+      # DOIS TOKENS, E CADA UM SO ONDE PRECISA. O `LEILOAI_STATUS_PAT` le o
+      # repositorio privado (branch e commit status, que e o que o
+      # `leiloai-canario-credencial.yml` prova em toda rodada). O
+      # `github.token` dispara workflow AQUI, com o `actions: write` que este
+      # job ja declara para o passo 4. Nenhum dos dois entra em URL, e nenhum
+      # e impresso.
+      #
+      # QUEM DECIDE E UM MODULO PURO, `leiloai-reconciliar-ponta.sh`, pelo mesmo
+      # motivo do seletor da fila: decisao em bloco `run:` nao se testa, e esta
+      # tem sete estados, quatro deles que NAO podem disparar nada.
+      - name: Reconciliar a ponta de feat/landing com a aprovacao
+        id: reconciliar
+        if: >-
+          steps.levantar.outputs.sem_credencial != 'true' &&
+          (github.event_name == 'schedule' ||
+           (github.event_name == 'workflow_dispatch' && inputs.modo == 'executar'))
+        env:
+          STATUS_PAT: ${{ secrets.LEILOAI_STATUS_PAT }}
+          PUBLIC_TOKEN: ${{ github.token }}
+          # O que o passo 4 acabou de pedir, se pediu. E isto, e nao a API, que
+          # responde "ja pedi para esta ponta": o run disparado leva segundos
+          # para publicar o `pendente`, e perguntar ao GitHub nessa janela diria
+          # "ninguem pediu" e pediria de novo.
+          SHA_MERGEADO: ${{ steps.mergear.outputs.sha_mergeado }}
+        run: |
+          set -euo pipefail
+          . .github/scripts/leiloai-reconciliar-ponta.sh
+
+          REPO_PRIVADO=RenatoPassos1/leilao-watch
+          BASE=feat/landing
+          CONTEXTO=ci/actions-engine
+          AQUI="${{ github.repository }}"
+
+          if [ -z "${STATUS_PAT:-}" ]; then
+            echo "::warning::sem credencial de leitura do repositorio privado; reconciliacao da ponta pulada nesta rodada"
+            exit 0
+          fi
+
+          # --- FATO 1: qual e a ponta agora.
+          # Falha de leitura ABORTA a reconciliacao, e nao vira disparo: sem
+          # saber a ponta, qualquer acao seria sobre um SHA adivinhado.
+          if ! PONTA=$(GH_TOKEN="$STATUS_PAT" gh api "repos/$REPO_PRIVADO/branches/$BASE" --jq .commit.sha 2>/dev/null); then
+            echo "::warning::nao consegui ler a ponta de $BASE nesta rodada; a proxima reavalia"
+            exit 0
+          fi
+          if ! printf '%s' "$PONTA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::warning::a ponta lida nao e um SHA de 40 hex; nada feito"
+            exit 0
+          fi
+          CURTO="${PONTA:0:8}"
+
+          # --- FATO 2: ja existe ref de aprovacao para ela?
+          # O nome do ref carrega o SHA inteiro, entao conferir o nome de volta
+          # e conferencia exata, e nao confirmacao de si mesma.
+          APROVADO=nao
+          REF_LIDO=$(GH_TOKEN="$PUBLIC_TOKEN" gh api "repos/$AQUI/git/ref/ci-aprovado/$PONTA" --jq .ref 2>/dev/null || true)
+          [ "$REF_LIDO" = "refs/ci-aprovado/$PONTA" ] && APROVADO=sim
+
+          # --- FATO 3: o veredito do CI para ela.
+          VEREDITO=ausente
+          if [ "$APROVADO" = nao ]; then
+            if ! LIDO=$(GH_TOKEN="$STATUS_PAT" gh api "repos/$REPO_PRIVADO/commits/$PONTA/status" \
+                          --jq "([.statuses[] | select(.context == \"$CONTEXTO\")] | sort_by(.created_at) | last | .state) // \"ausente\"" 2>/dev/null); then
+              echo "::warning::nao consegui ler o veredito de $CURTO nesta rodada; a proxima reavalia"
+              exit 0
+            fi
+            VEREDITO="$LIDO"
+          fi
+
+          # --- FATO 4: ha execucao em voo, e ela ainda esta viva?
+          PENDENTE=ausente
+          if [ "$APROVADO" = nao ] && { [ "$VEREDITO" = ausente ] || [ "$VEREDITO" = pending ]; }; then
+            ALVO=$(GH_TOKEN="$STATUS_PAT" gh api "repos/$REPO_PRIVADO/commits/$PONTA/status" \
+                     --jq "([.statuses[] | select(.context == \"$CONTEXTO/pendente\")] | sort_by(.created_at) | last | .target_url) // \"\"" 2>/dev/null || true)
+            if [ -n "$ALVO" ]; then
+              # `target_url` vem de um status, ou seja, e DADO. So vira id de run
+              # se casar inteiro com o formato que o proprio ci-publico publica,
+              # e neste repositorio.
+              RUN_ID=$(extrair_run_id "$ALVO" "$AQUI") || RUN_ID=""
+              if [ -z "$RUN_ID" ]; then
+                PENDENTE=url_invalida
+              else
+                PENDENTE=$(GH_TOKEN="$PUBLIC_TOKEN" gh api "repos/$AQUI/actions/runs/$RUN_ID" --jq .status 2>/dev/null || echo desconhecido)
+              fi
+            fi
+          fi
+
+          JA=nao
+          if [ -n "${SHA_MERGEADO:-}" ] && [ "$SHA_MERGEADO" = "$PONTA" ]; then
+            JA=sim
+          fi
+
+          set +e
+          DECISAO=$(decidir_reconciliacao "$JA" "$APROVADO" "$VEREDITO" "$PENDENTE")
+          RC=$?
+          set -e
+
+          echo "reconciliacao: ponta=$CURTO aprovado=$APROVADO veredito=$VEREDITO pendente=$PENDENTE ja_disparado=$JA decisao=$DECISAO"
+
+          ACAO=nenhuma
+          case "$DECISAO" in
+            aprovado)
+              echo "::notice::ponta $CURTO ja tem ref de aprovacao; nada a pedir" ;;
+            ja_disparado)
+              echo "::notice::ponta $CURTO e o merge desta rodada, e o CI dela ja foi pedido no passo anterior; nao duplico" ;;
+            em_voo)
+              echo "::notice::ponta $CURTO ja tem CI em execucao ($PENDENTE); so esperar" ;;
+            veredito_terminal_nao_success)
+              echo "::notice::ponta $CURTO tem veredito $VEREDITO. NAO reexecuto sozinho: commit vermelho remedido em laco e laco infinito de 14 min por volta. Quem decidir remedir usa o input forcar; commit novo resolve por si, porque a ponta passa a ser outra." ;;
+            aprovar)
+              ACAO=ci-aprovado
+              if GH_TOKEN="$PUBLIC_TOKEN" gh workflow run leiloai-ci-aprovado.yml \
+                   --repo "$AQUI" -f sha="$PONTA" >/dev/null 2>&1; then
+                echo "::notice::ponta $CURTO esta verde e sem ref; pedi a aprovacao"
+              else
+                ACAO="ci-aprovado (falhou)"
+                echo "::warning::nao consegui pedir a aprovacao de $CURTO; a proxima rodada tenta de novo"
+              fi ;;
+            morreu_sem_veredito|nunca_pedido)
+              ACAO=ci-publico
+              if GH_TOKEN="$PUBLIC_TOKEN" gh workflow run leiloai-ci-publico.yml \
+                   --repo "$AQUI" -f sha="$PONTA" -f mode=full >/dev/null 2>&1; then
+                echo "::notice::ponta $CURTO sem CI ($DECISAO); pedi o CI publico"
+              else
+                ACAO="ci-publico (falhou)"
+                echo "::warning::nao consegui pedir o CI publico de $CURTO; a proxima rodada tenta de novo"
+              fi ;;
+            *)
+              echo "::warning::estado que este passo nao sabe classificar (veredito=$VEREDITO pendente=$PENDENTE, codigo $RC). NAO disparo nada: disparo as cegas a cada rodada e o laco que satura o runner." ;;
+          esac
+
+          {
+            echo "### coordenador da fila: reconciliacao da ponta"
+            echo ""
+            echo "- ponta: \`$CURTO\`"
+            echo "- aprovada: $APROVADO | veredito: $VEREDITO | em voo: $PENDENTE"
+            echo "- decisao: \`$DECISAO\` | acao: $ACAO"
           } >> "$GITHUB_STEP_SUMMARY"
