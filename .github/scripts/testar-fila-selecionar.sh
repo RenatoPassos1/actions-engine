@@ -40,7 +40,7 @@ if [ "${1:-}" != "--uma" ]; then
   sed -e 's/bash "\$SEL" fora_da_base/bash "$SEL" primeiras_80/' \
       -e 's/--merge --match-head-commit "\$sha"/--squash/' \
       -e 's/"\$cabeca" != "\$sha"/"$cabeca" = "nunca"/' \
-      -e 's/select(.fila != null and .fila.state == "success")/select(.fila != null and .fila.state == "success" and .ci == "ci\/actions-engine")/' \
+      -e 's#jq -s -f .github/scripts/leiloai-fila-elegiveis.jq#jq -s -f .github/scripts/regra-que-so-olha-a-fila.jq#' \
       -e 's/^  contents: read/  contents: write/' \
       -e 's/^          TETO_COMPARACOES=80$/          TETO_COMPARACOES=80\n          echo "teto atingido; pontas restantes NAO foram avaliadas"/' \
       "$RAIZ/.github/workflows/leiloai-coordenador-fila.yml" > "$MUT"
@@ -281,19 +281,23 @@ else
 fi
 
 # test_pr_head_ci_state_and_merge_sha_ci_state_are_not_conflated
-# A negativa e ANCORADA NA LINHA DO `select`, e nao no arquivo inteiro,
-# desde 16/09/2026: o passo de reconciliacao da ponta le legitimamente o
-# contexto `ci/actions-engine` do SHA da PONTA, que e outra pergunta.
-# Proibir a string no arquivo todo transformaria este teste em "ninguem
-# pode citar o contexto", que nao e a regra; a regra e que a
-# ELEGIBILIDADE nao pode olhar o CI. A mutacao do controle negativo poe
-# a string exatamente dentro do `select`, entao ela continua sendo pega.
-if printf '%s' "$CODIGO" | grep -q 'select(.fila != null and .fila.state == "success")' \
-   && ! printf '%s' "$CODIGO" | grep -E 'select\(\.fila' | grep -q 'ci/actions-engine' \
+#
+# REESCRITO EM 21/09/2026, e a intencao dele NAO mudou. Ate entao esta assercao
+# exigia que a elegibilidade NAO lesse `ci/actions-engine`, e isso codificava a
+# regra que deixou 11 de 11 merges daquele dia sairem com o CI rodando. O que
+# ela protegia de verdade era nao CONFUNDIR os dois SHAs: o CI que decide o
+# merge e o da ENTREGA (o SHA do finish), e o CI disparado depois do merge e o
+# do MERGE commit. A forma nova vigia exatamente isso: fila e CI lidos na MESMA
+# chamada, do MESMO `$sha` da entrega; a decisao passa pelo filtro que exige os
+# dois; e o disparo pos-merge segue indo para `sha_mergeado`.
+if printf '%s' "$CODIGO" | grep -q 'jq -s -f .github/scripts/leiloai-fila-elegiveis.jq' \
+   && printf '%s' "$CODIGO" | grep -q 'repos/\$REPO/commits/\$sha/status' \
+   && printf '%s' "$CODIGO" | grep -q 'select(.context=="ci/actions-engine")' \
+   && printf '%s' "$CODIGO" | grep -q 'select(.context=="coordenacao/fila")' \
    && printf '%s' "$CODIGO" | grep -q 'SHA: \${{ steps.mergear.outputs.sha_mergeado }}'; then
-  passou "workflow: elegibilidade continua sendo coordenacao/fila da ENTREGA, e o CI disparado e o do MERGE commit"
+  passou "workflow: elegibilidade exige fila E CI verdes da ENTREGA, lidos do mesmo SHA, e o CI disparado segue sendo o do MERGE commit"
 else
-  reprovou "workflow: a elegibilidade passou a ler outro status, ou o CI deixou de ir para o merge commit"
+  reprovou "workflow: a elegibilidade deixou de exigir CI verde da entrega, leu SHA diferente, ou o CI deixou de ir para o merge commit"
 fi
 
 # test_deploy_approval_semantics_preserved: este workflow nao cria ref de

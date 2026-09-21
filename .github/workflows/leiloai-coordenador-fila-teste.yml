@@ -19,6 +19,8 @@ on:
       - ".github/scripts/testar-fila-selecionar.sh"
       - ".github/scripts/leiloai-reconciliar-ponta.sh"
       - ".github/scripts/testar-reconciliar-ponta.sh"
+      - ".github/scripts/leiloai-fila-elegiveis.jq"
+      - ".github/scripts/testar-fila-elegibilidade.sh"
   push:
     branches: ["main"]
     paths:
@@ -28,6 +30,8 @@ on:
       - ".github/scripts/testar-fila-selecionar.sh"
       - ".github/scripts/leiloai-reconciliar-ponta.sh"
       - ".github/scripts/testar-reconciliar-ponta.sh"
+      - ".github/scripts/leiloai-fila-elegiveis.jq"
+      - ".github/scripts/testar-fila-elegibilidade.sh"
   workflow_dispatch:
 
 permissions:
@@ -46,3 +50,5 @@ jobs:
         run: bash .github/scripts/testar-fila-selecionar.sh
       - name: Testes da reconciliacao da ponta, com controle negativo
         run: bash .github/scripts/testar-reconciliar-ponta.sh
+      - name: Testes da elegibilidade (fila E CI verdes), com controle negativo
+        run: bash .github/scripts/testar-fila-elegibilidade.sh
