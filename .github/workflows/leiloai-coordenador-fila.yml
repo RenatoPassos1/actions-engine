@@ -120,12 +120,15 @@
 #   ESTE WORKFLOW, antes de mergear:
 #     ENTREGA = ponta do PR = SHA que passou pelo `finish`
 #       precisa de status `coordenacao/fila` = success NAQUELE SHA,
+#       E de status `ci/actions-engine` = success NAQUELE SHA (desde
+#       21/09/2026; pendente, ausente ou vermelho barram),
 #       PR aberto, nao rascunho, MERGEABLE, e a ponta do PR igual a ele.
-#     NAO consulta `ci/actions-engine` da ponta do PR.
 #
 #   `agentctl coordenar` (o coordenador local, mesma fila):
 #     exige PR aberto E `ci/actions-engine` verde na ponta do PR.
-#     Os dois coordenadores divergem aqui, e isto so registra o que cada um faz.
+#     Ate 20/09/2026 os dois coordenadores divergiam aqui: este mergeava com o
+#     CI da ponta rodando. Medido em 21/09: 11 de 11 merges com CI em curso,
+#     7 vereditos `failure` depois, integracao vermelha por mais de 1 h.
 #
 #   VPS, `scripts/deploy.sh` no repositorio privado, antes de publicar:
 #     ALVO = commit que vai ao ar, em geral o MERGE COMMIT (ponta de
@@ -227,6 +230,7 @@ jobs:
           sparse-checkout: |
             .github/scripts/leiloai-fila-selecionar.sh
             .github/scripts/leiloai-reconciliar-ponta.sh
+            .github/scripts/leiloai-fila-elegiveis.jq
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -428,16 +432,29 @@ jobs:
           # O carimbo e a hora do `finish`, e e ele que da a ordem. Ponta que
           # andou depois do `finish` nao tem status naquele SHA e cai fora
           # sozinha: o veredito e do SHA, nunca do PR nem do branch.
+          #
+          # E O VEREDITO DE CI DO MESMO SHA, NA MESMA CHAMADA (desde 21/09/2026).
+          # Ate entao so `coordenacao/fila` era colhido, e o merge saia com o CI
+          # ainda rodando: 11 de 11 merges de 09:35 a 10:29Z daquele dia. Quem
+          # decide o que fazer com os dois e `leiloai-fila-elegiveis.jq`; aqui
+          # so se coleta. Leitura que falhou vira `null` nos dois, e `null`
+          # barra: fail-closed, sem chamada de API a mais por SHA.
           : > fila/vereditos.jsonl
           while read -r numero sha; do
             [ -n "${sha:-}" ] || continue
             linha=$(gh api "repos/$REPO/commits/$sha/status" \
-                      --jq '[.statuses[] | select(.context=="coordenacao/fila")]
-                            | sort_by(.created_at) | last
-                            | {state, created_at}' 2>/dev/null || echo 'null')
+                      --jq '{fila: ([.statuses[] | select(.context=="coordenacao/fila")]
+                                    | sort_by(.created_at) | last
+                                    | if . == null then null else {state, created_at} end),
+                             ci:   ([.statuses[] | select(.context=="ci/actions-engine")]
+                                    | sort_by(.created_at) | last
+                                    | if . == null then null else {state, created_at} end)}' \
+                      2>/dev/null || echo 'null')
+            [ -n "${linha:-}" ] || linha=null
             if [ "$numero" = "-" ]; then numero=null; fi
-            printf '{"numero":%s,"sha":"%s","fila":%s}\n' "$numero" "$sha" "${linha:-null}" \
-              >> fila/vereditos.jsonl
+            jq -c --argjson n "$numero" --arg s "$sha" \
+              '{numero: $n, sha: $s, fila: (.fila // null), ci: (.ci // null)}' \
+              <<< "$linha" >> fila/vereditos.jsonl
           done < fila/candidatos.txt
           echo "vereditos coletados: $(grep -c . fila/vereditos.jsonl || true)"
 
@@ -453,13 +470,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Elegivel = tem veredito de fila com sucesso PARA A PONTA ATUAL. O
-          # veredito e do SHA: ponta que andou depois do `finish` nao tem status
-          # naquele SHA e cai fora sozinha, sem regra extra.
-          jq -s '
-            [ .[] | select(.fila != null and .fila.state == "success") ]
-            | sort_by(.fila.created_at)
-          ' fila/vereditos.jsonl > fila/elegiveis.json
+          # Elegivel = veredito de FILA e de CI, os dois `success`, NO MESMO
+          # SHA que o finish julgou. Ponta que andou depois do `finish` nao tem
+          # status naquele SHA e cai fora sozinha. A regra mora num arquivo
+          # proprio para poder ser testada com controle negativo; ver o
+          # cabecalho de `leiloai-fila-elegiveis.jq`.
+          jq -s -f .github/scripts/leiloai-fila-elegiveis.jq fila/vereditos.jsonl > fila/decisao.json
+          jq '.elegiveis' fila/decisao.json > fila/elegiveis.json
 
           # SO SHA E NUMERO DE PR SAEM NO LOG. Nome de branch NAO sai, pelo
           # mesmo motivo que titulo de PR nao sai: `agent/fontes-<algo>` nomeia
@@ -467,9 +484,8 @@ jobs:
           # estar logado.
           jq -r '.[] | "  elegivel  PR \(.numero // "-")  ponta \(.sha[0:8])  finish \(.fila.created_at)"' \
             fila/elegiveis.json
-          jq -s -r '.[] | select(.fila == null or .fila.state != "success")
-                        | "  BARRADO   PR \(.numero // "-")  ponta \(.sha[0:8])  sem veredito de fila neste SHA"' \
-            fila/vereditos.jsonl
+          jq -r '.barrados[] | "  BARRADO   PR \(.numero // "-")  ponta \(.sha[0:8])  \(.motivo)"' \
+            fila/decisao.json
 
           # DETECTOR DE ESPERA. A elegivel mais antiga, em minutos desde o
           # `finish`. Nao prova nada sozinho (autor que nao abriu PR tambem
