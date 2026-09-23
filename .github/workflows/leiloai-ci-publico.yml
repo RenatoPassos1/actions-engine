@@ -700,3 +700,57 @@ jobs:
             echo "runner_arch=arm64"
             echo "conclusion=$ESTADO"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ======================================================================
+      # RESOLVER O MARCADOR `/pendente`. PASSO PROPRIO, E `if: always()`.
+      # ======================================================================
+      #
+      # O `Publicar PENDING no SHA exato` (job `resolver`) escreve
+      # `$CONTEXTO/pendente` como `pending` ao COMECAR e, ate 23/09/2026, nada
+      # escrevia o desfecho nele. Como o status COMBINADO de um commit e o pior
+      # estado entre os contextos, aquele marcador segurava o commit em
+      # `pending` PARA SEMPRE, mesmo com `ci/actions-engine` em `success`.
+      #
+      # Medido em 23/09/2026: um SHA com `/pendente` escrito 12:09:18Z e o
+      # veredito `success` publicado as 12:27 continuava com o combinado em
+      # `pending`. O projeto convive com isso pela regra "leia
+      # `ci/actions-engine` SOZINHO, nunca o agregado", mas a regra so protege
+      # QUEM A CONHECE: ferramenta de terceiro, a UI do proprio GitHub e
+      # qualquer consumidor novo leem o agregado.
+      #
+      # O MARCADOR NAO E O DEFEITO, E NAO DEVE SER APAGADO. Ele e irmao do
+      # contexto do veredito de proposito: a primeira versao publicava o
+      # `pending` no PROPRIO `ci/actions-engine`, e era pior, porque o
+      # `resolver` conta `[.statuses[] | select(.context == $CONTEXTO)]` sem
+      # olhar o estado, entao um `pending` virava "ja tem veredito". O conserto
+      # e escrever o desfecho no irmao, nao remove-lo.
+      #
+      # POR QUE `success` SEMPRE, E NAO O ESPELHO DO VEREDITO. Este contexto
+      # responde "ha execucao em voo?", e nao "o codigo passou?". Espelhar o
+      # veredito criaria uma SEGUNDA fonte do mesmo fato, que e exatamente a
+      # armadilha que o comentario acima descreve. Com `success` fixo, o
+      # agregado passa a valer o veredito: verde quando o CI ficou verde,
+      # vermelho quando reprovou.
+      #
+      # POR QUE PASSO SEPARADO, e nao o fim do passo anterior. Aquele passo tem
+      # `set -euo pipefail` e sai `exit 1` em tres lugares (sha invalido,
+      # aprovacao nao disparada, coordenador nao acordado). Qualquer um deles
+      # deixaria o marcador orfao de novo, que e precisamente o defeito. O
+      # `if: always()` cobre tambem o job cancelado.
+      #
+      # RESIDUO CONHECIDO, e ele nao tem conserto daqui: se o runner deste job
+      # morrer antes deste passo, o marcador fica orfao. E o mesmo
+      # `if: always()` que cobre todo o resto.
+      - name: Resolver o marcador /pendente
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
+          SHA: ${{ needs.resolver.outputs.sha }}
+        run: |
+          set -uo pipefail
+          if [ "$PUBLICAR_STATUS" != "true" ]; then
+            echo "SHADOW: nao resolvo o marcador"; exit 0
+          fi
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || {
+            echo "::warning::sha invalido; marcador nao resolvido"; exit 0; }
+          gh api -X POST "repos/$REPO_PRIVADO/statuses/$SHA"             -f state=success             -f context="$CONTEXTO/pendente"             -f description="execucao terminou; o veredito esta em $CONTEXTO"             -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"             > /dev/null             && echo "marcador resolvido para ${SHA:0:8}"             || echo "::warning::nao consegui resolver o marcador; o veredito ja esta publicado"
