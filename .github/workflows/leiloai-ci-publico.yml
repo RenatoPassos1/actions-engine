@@ -118,7 +118,7 @@ permissions: {}
 # adianta rodar duas vezes o mesmo codigo).
 concurrency:
   group: leiloai-ci-publico-${{ inputs.sha || github.sha }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   # Hard-coded de proposito (secao 43.1): repositorio nunca vem de input.
