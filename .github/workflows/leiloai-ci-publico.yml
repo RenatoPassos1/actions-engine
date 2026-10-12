@@ -673,7 +673,51 @@ jobs:
           # merge commit da ponta ele pode mergear a PROXIMA da fila. Chamada a
           # mais e inofensiva: o coordenador decide pelos proprios portoes
           # (PR aberto, CI verde, ordem), e o `concurrency` dele serializa.
+          # DESCONEXAO DECLARADA: coordenador DESLIGADO de proposito nao e falha.
+          #
+          # MEDIDO EM 12/10/2026: o `leiloai-coordenador-fila.yml` foi posto em
+          # `disabled_manually` as 02:39:47Z, para o congelamento do integrador ser
+          # mecanismo e nao declaracao. `gh workflow run` num workflow desactivado
+          # falha, as tres tentativas falham, este passo fazia `exit 1`, e a corrida
+          # concluia `failure` com o veredito VERDE ja publicado no SHA. Quatro
+          # corridas seguidas assim, de 02:57Z a 03:57Z.
+          #
+          # E O DANO NAO E COSMETICO: no caminho VERMELHO este bloco nem corre, logo
+          # a conclusao da corrida era `failure` nos DOIS casos e deixou de distinguir
+          # reprovacao real de coordenador desligado. Sinal que vale o mesmo em todos
+          # os estados nao carrega informacao, e `BLIND_CI_RERUNS=0` depende de
+          # alguem poder ler o estado verdadeiro para nao pedir rerun as cegas.
+          #
+          # NAO SE SUPRIME O AVISO, muda-se de erro para NOTICIA DECLARADA: se o
+          # caminho feliz e o congelamento ficassem iguais no log, voltaria o defeito
+          # de 29/08 que custou duas intervencoes externas em 1h20, e que o
+          # comentario deste proprio ficheiro descreve.
+          #
+          # LER FALHOU NAO E ESTAR DESLIGADO: sem resposta da API a variavel fica
+          # VAZIA e o fluxo segue para o ramo activo, que ainda faz `exit 1`. A
+          # isencao exige a PROVA `disabled_manually`, e nao a ausencia dela.
+          #
+          # O QUE ESTE NOTICE NAO PODE DIZER, e fica declarado: o motivo e o autor do
+          # congelamento vivem no banco do `agentctl`, na maquina do agente, que este
+          # runner NAO alcanca. Citar um motivo aqui seria inventa-lo, entao o notice
+          # aponta ONDE ele se le.
+          # >>> BLOCO-ACORDAR-COORDENADOR  (extraido e CORRIDO por
+          #     .github/scripts/testar-congelamento-nao-reprova.sh, que o exercita
+          #     com dubles de `gh`. Marcador EXPLICITO de proposito: a alternativa
+          #     e o teste ancorar por proximidade, e ancora por proximidade migra
+          #     calada quando alguem insere uma linha no meio.)
+          estado_coordenador=""
           if [ "$ESTADO" = "success" ]; then
+            estado_coordenador=$(GH_TOKEN="$TOKEN_DISPARO" gh api \
+              "repos/${{ github.repository }}/actions/workflows/leiloai-coordenador-fila.yml" \
+              --jq '.state' 2>/dev/null || true)
+            if [ "$estado_coordenador" = "disabled_manually" ]; then
+              echo "::notice::Coordenador da fila em disabled_manually: DESLIGADO de proposito, e isto NAO e falha. O veredito deste SHA ja foi publicado e a aprovacao ja foi acordada acima; a entrega fica na fila ate alguem integrar."
+              echo "::notice::Motivo e autor do congelamento: leia o campo congelado.motivo_e_autor do agentctl status. Este runner nao alcanca esse estado, por isso nao o cita."
+              echo "::notice::Para reactivar: gh workflow enable leiloai-coordenador-fila.yml --repo ${{ github.repository }}"
+            fi
+          fi
+          if [ "$ESTADO" = "success" ] && [ "$estado_coordenador" != "disabled_manually" ]; then
             acordou=0
             for tentativa in 1 2 3; do
               if GH_TOKEN="$TOKEN_DISPARO" gh workflow run leiloai-coordenador-fila.yml \
@@ -692,6 +736,7 @@ jobs:
               exit 1
             fi
           fi
+          # <<< BLOCO-ACORDAR-COORDENADOR
 
           # Provenance (secao 49.4), sem source intel.
           {
