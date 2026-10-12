@@ -89,3 +89,24 @@ jobs:
       - name: Guarda do veredito do CI publico (status nao aprova sem compute)
         if: always()
         run: bash .github/scripts/testar-guarda-status-ci-publico.sh
+
+      # CONGELAMENTO DO COORDENADOR: NOTICIA, E NAO FALHA DO CI.
+      #
+      # Medido em 12/10/2026: com o `leiloai-coordenador-fila.yml` em
+      # `disabled_manually`, o passo de publicar o veredito nao conseguia
+      # acorda-lo, fazia `exit 1`, e quatro corridas seguidas concluiram
+      # `failure` com o veredito VERDE ja publicado no SHA. No caminho vermelho
+      # aquele bloco nem corre, logo a conclusao da corrida era `failure` nos
+      # DOIS casos e deixou de carregar informacao nenhuma.
+      #
+      # O teste EXTRAI o bloco do YAML por marcador explicito e CORRE-O com
+      # dubles de `gh`, porque o invariante aqui e comportamento (`exit 1` num
+      # ramo, `exit 0` noutro) e trava textual nao distingue ramos.
+      #
+      # As duas metades andam juntas de proposito: congelado nao reprova, e
+      # ACTIVO inalcancavel CONTINUA a reprovar. A segunda e o que impede o
+      # conserto da primeira de virar falso verde e apagar o alarme que o
+      # defeito de 29/08/2026 deixou ali.
+      - name: Congelamento do coordenador e noticia, e nao falha do CI
+        if: always()
+        run: bash .github/scripts/testar-congelamento-nao-reprova.sh
