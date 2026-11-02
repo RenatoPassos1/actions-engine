@@ -1,0 +1,15 @@
+# slug	url	http_esperado	exige	proibe
+# `exige`: substring obrigatoria no corpo. Para alvo 3xx, e o INICIO do Location.
+# `proibe`: substring que, presente, reprova mesmo com o HTTP certo. `-` desliga.
+#
+# O campo `proibe` existe por um caso real: a home ja serviu 200 com a frase
+# "Algo deu errado desta vez" no lugar do conteudo. Monitor que le so o codigo
+# aprova isso, e foi assim que o site passou horas "verde" e quebrado.
+home	https://leiloai.com/	200	o maior agregador de leil	Algo deu errado
+entrar	https://leiloai.com/entrar	200	>Entrar	Algo deu errado
+sitemap	https://leiloai.com/sitemap.xml	200	<urlset	-
+painel	https://leiloai.com/painel	307	/entrar	-
+api-v1	https://leiloai.com/api/v1	200	"ok": true	-
+planos	https://leiloai.com/planos	200	>Planos	Algo deu errado
+blog	https://leiloai.com/blog	200	Blog Leil	Algo deu errado
+funcionalidades	https://leiloai.com/funcionalidades	200	>Funcionalidades	Algo deu errado
