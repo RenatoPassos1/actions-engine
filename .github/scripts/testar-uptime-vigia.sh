@@ -44,6 +44,13 @@ PORTA_MORTA="${UPTIME_PORTA_MORTA:-8098}"
 # No runner e `python3`. Na maquina Windows do dono, `python3` e um alias de
 # OUTRO pacote MSIX e nao serve: ali se roda com UPTIME_PYTHON=python.
 PY_BIN="${UPTIME_PYTHON:-python3}"
+# 1 (padrao) = o lado do GitHub vira diario em ficheiro, e o teste nao toca a
+# API. 0 = ENSAIO DE VERDADE: o mesmo roteiro, mas abrindo e fechando uma issue
+# real com o token do workflow. Existe porque a doenca que motivou este
+# trabalho foi um alerta que detectava e NAO entregava, cinco meses seguidos:
+# so o ensaio com o token real prova a entrega. Deixa como prova uma issue
+# `[uptime] ensaio fora do ar` aberta e fechada dentro da mesma corrida.
+SEM_GH="${UPTIME_SEM_GITHUB:-1}"
 SRV_PID=""
 FALHAS=0
 
@@ -96,7 +103,7 @@ alvos() {
 rodar() {
   local vezes="$1" i
   for i in $(seq 1 "$vezes"); do
-    UPTIME_SEM_GITHUB=1 \
+    UPTIME_SEM_GITHUB="$SEM_GH" \
     UPTIME_DIARIO="$TMP/diario" \
     UPTIME_ALVOS="$TMP/alvos.tsv" \
     UPTIME_ESTADO="$TMP/estado" \
@@ -184,7 +191,7 @@ afirma "pagina boa continua sem abrir incidente" "0" "$(conta "$TITULO")"
 
 echo
 if [ "$FALHAS" -eq 0 ]; then
-  echo "TESTE DO VIGIA: PASSOU (7 cenarios, 11 afirmacoes)"
+  echo "TESTE DO VIGIA: PASSOU (7 cenarios, 11 afirmacoes, SEM_GITHUB=$SEM_GH)"
   exit 0
 fi
 echo "TESTE DO VIGIA: $FALHAS afirmacao(oes) reprovada(s)"

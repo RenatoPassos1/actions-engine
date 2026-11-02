@@ -36,6 +36,10 @@ on:
         description: "Duracao do laco em minutos (o tecto do job e 350)"
         required: false
         default: "330"
+      ensaio:
+        description: "sim = ensaio de entrega: abre e fecha uma issue REAL contra um servidor local, e nao vigia producao"
+        required: false
+        default: "nao"
 
 permissions:
   issues: write
@@ -52,7 +56,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
 
+      # ENSAIO DE ENTREGA: o roteiro de teste contra um servidor local, mas com
+      # o token de verdade, abrindo e fechando uma issue real. E o unico jeito
+      # de provar que o alerta ENTREGA, e nao so que detecta. Nao toca
+      # leiloai.com e nao vigia nada: quando corre, o passo seguinte nao corre.
+      - name: Ensaio de entrega (abre e fecha issue real)
+        if: github.event.inputs.ensaio == 'sim'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPTIME_REPO: ${{ github.repository }}
+          UPTIME_SEM_GITHUB: "0"
+        run: bash .github/scripts/testar-uptime-vigia.sh
+
       - name: Vigia o HTTP publico
+        if: github.event.inputs.ensaio != 'sim'
         env:
           GH_TOKEN: ${{ github.token }}
           UPTIME_REPO: ${{ github.repository }}
