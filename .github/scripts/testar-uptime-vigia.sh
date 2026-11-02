@@ -128,14 +128,28 @@ zerar() {
   rm -rf "$TMP/estado"
   mkdir -p "$TMP/estado"
   [ "$SEM_GH" = "1" ] && return 0
-  local n
-  for n in $(gh issue list --repo "${UPTIME_REPO:-$GITHUB_REPOSITORY}" \
-                --label leiloai-uptime --state open --limit 50 --json number,title 2>/dev/null \
-             | jq -r '.[] | select(.title == "[uptime] ensaio fora do ar") | .number'); do
+  local n i
+  for n in $(abertas_do_ensaio); do
     gh issue close "$n" --repo "${UPTIME_REPO:-$GITHUB_REPOSITORY}" \
        --comment "Fecho de limpeza entre cenarios do ensaio." > /dev/null 2>&1
   done
+  # ESPERA ATE A API CONCORDAR. Fechar e pedir: a listagem ainda devolve a
+  # issue por alguns segundos. Sem esta espera o cenario seguinte perguntava
+  # "ha incidente aberto?", a API dizia que sim, e o vigia COMENTAVA em vez de
+  # abrir: ABRIU=0 com o produto a fazer a coisa certa. Foi o unico caso que
+  # sobrou reprovado no terceiro ensaio, e e defeito do ensaio, nao do vigia.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(abertas_do_ensaio)" ] && return 0
+    sleep 2
+  done
+  echo "  [aviso] a API ainda lista a issue de ensaio como aberta apos 20 s"
   return 0
+}
+
+abertas_do_ensaio() {
+  gh issue list --repo "${UPTIME_REPO:-$GITHUB_REPOSITORY}" \
+     --label leiloai-uptime --state open --limit 50 --json number,title 2>/dev/null \
+    | jq -r '.[] | select(.title == "[uptime] ensaio fora do ar") | .number'
 }
 
 MARCA="MARCADOR-DE-ENSAIO-UPTIME"
