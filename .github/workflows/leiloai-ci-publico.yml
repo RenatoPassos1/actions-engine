@@ -125,6 +125,9 @@ env:
   REPO_PRIVADO: RenatoPassos1/leilao-watch
   BRANCH: feat/landing
   CONTEXTO: ci/actions-engine
+  # Canal PROPRIO da divida operacional. Separado de proposito: ver o job
+  # `divida` no fim deste arquivo.
+  CONTEXTO_DIVIDA: ops/divida-operacional
   # SHADOW -> CUTOVER com uma linha.
   #
   # Enquanto vale "false", este workflow roda inteiro, mede e imprime o
@@ -280,6 +283,11 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     permissions: {}
+    # A divida operacional sai daqui como NUMERO, e nao como linha de log.
+    # Quem a julga e o job `divida`, que tem contexto e veredito proprios.
+    outputs:
+      divida: ${{ steps.divida.outputs.n }}
+      divida_lida: ${{ steps.divida.outputs.lida }}
     steps:
       # ======================================================================
       # O UNICO step com credencial, e o clone e feito a mao.
@@ -548,6 +556,51 @@ jobs:
           SHA_ESPERADO: ${{ needs.resolver.outputs.sha }}
         run: bash scripts/ci/run-public-safe-ci.sh "${{ needs.resolver.outputs.mode }}"
 
+      # ======================================================================
+      # DIVIDA OPERACIONAL: medida AQUI, julgada no job `divida`.
+      # ======================================================================
+      #
+      # Em 28/10/2026 o portao de plano foi separado em dois tipos de achado:
+      # o de CODIGO, que o PR pode satisfazer e reprova o PR, e o OPERACIONAL,
+      # que descreve a producao ou a passagem do tempo e nenhum merge conserta.
+      #
+      # O operacional NAO pode reprovar `ci/actions-engine`, e isso foi medido:
+      # `leiloai-ci-aprovado` le o status do commit para publicar
+      # `refs/ci-aprovado/<sha>`, a VPS so puxa SHA que tenha esse ref, e o
+      # deploy e quem aplica a migration que PAGA a divida. Reprovar ali
+      # fecharia o ciclo: divida impede deploy, deploy e o unico que a paga.
+      #
+      # Entao a divida tem canal proprio. Este passo so MEDE, nunca reprova
+      # este job: `|| true` de proposito, e `always()` para medir tambem
+      # quando o CI falhou, porque divida de producao nao depende de o patch
+      # estar bom.
+      #
+      # O numero sai do proprio validador, nao de uma segunda contagem escrita
+      # aqui: duas expressoes para a mesma pergunta divergem com o tempo.
+      - name: Medir divida operacional
+        id: divida
+        if: always()
+        env:
+          PORTAO_BASELINE: "1"
+          SEM_REPO_PUBLICO: "1"
+        run: |
+          set -uo pipefail
+          saida="$(node scripts/validar-execution-plane.mjs --baseline 2>&1 || true)"
+          linha="$(printf '%s' "$saida" | grep -oE 'METRICA divida-operacional n=[0-9]+' | tail -1 || true)"
+          if [ -z "$linha" ]; then
+            # AUSENTE nao e ZERO. Sem a linha, o julgador tem de saber que a
+            # medicao nao aconteceu, em vez de ler zero e aprovar por vacuidade.
+            echo "lida=false" >> "$GITHUB_OUTPUT"
+            echo "n=-1" >> "$GITHUB_OUTPUT"
+            echo "DIVIDA_OPERACIONAL nao medida (validador nao imprimiu a metrica)"
+            exit 0
+          fi
+          n="${linha##*n=}"
+          echo "lida=true" >> "$GITHUB_OUTPUT"
+          echo "n=$n" >> "$GITHUB_OUTPUT"
+          echo "DIVIDA_OPERACIONAL n=$n"
+          printf '%s' "$saida" | grep -E '^  OPERACIONAL ' || true
+
   # ==========================================================================
   # JOB B — STATUS: a autoridade. VM nova, sem checkout, sem codigo privado.
   # ==========================================================================
@@ -744,4 +797,99 @@ jobs:
             echo "actions_engine_run_id=${{ github.run_id }}"
             echo "runner_arch=arm64"
             echo "conclusion=$ESTADO"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # JOB C — DIVIDA OPERACIONAL: canal proprio, contexto proprio, veredito
+  # proprio. VM nova, sem checkout, sem codigo privado.
+  # ==========================================================================
+  #
+  # POR QUE UM CANAL SEPARADO, E NAO OUTRO LIMIAR NO MESMO
+  #
+  # O portao de plano distingue achado de CODIGO, que o PR pode satisfazer, de
+  # achado OPERACIONAL, que descreve a producao ou a passagem do tempo e
+  # nenhum merge conserta. Rotear o operacional para `ci/actions-engine`
+  # fecharia um ciclo medido em 28/10/2026: `leiloai-ci-aprovado` exige esse
+  # status para publicar `refs/ci-aprovado/<sha>`, a VPS so puxa SHA com esse
+  # ref, e o deploy e o UNICO que aplica a migration que paga a divida. Divida
+  # bloquearia o deploy, e o deploy era quem a pagava.
+  #
+  # POR QUE ESTE JOB NUNCA FICA VERMELHO, e isso NAO e afrouxamento
+  #
+  # Medido no proprio avaliador da aprovacao (`scripts/avaliar-checks.mjs` do
+  # repo privado):
+  #
+  #   STATUSES_PADRAO = ["ci/actions-engine"]   <- so este status e exigido
+  #   CHECKS_PADRAO   = []                      <- nenhum job e "obrigatorio"
+  #   ...e a regra `outrosVermelhos` REPROVA a aprovacao se QUALQUER job nao
+  #      obrigatorio estiver vermelho.
+  #
+  # Ou seja: um status novo em vermelho NAO bloqueia o deploy, mas um JOB
+  # vermelho bloquearia. Entao o veredito mora no STATUS, que e onde ele e
+  # visivel e auditavel, e o job sai 0 sempre. Trocar isto por `exit 1`
+  # reconstroi a circularidade por outro caminho.
+  #
+  # O QUE ELE EXIGE
+  #
+  #   divida = 0  ->  ops/divida-operacional = success
+  #   divida > 0  ->  ops/divida-operacional = failure   (na LINHA-DE-BASE)
+  #   nao medida  ->  ops/divida-operacional = failure   (ausente != zero)
+  #
+  # So publica quando o alvo E a linha-de-base, isto e quando ninguem passou
+  # `sha` e o resolver foi buscar a ponta do branch. Num PR a divida continua
+  # a ser medida e impressa no log do compute, e nao e cobrada de quem abriu
+  # o PR, que e a semantica inteira desta separacao.
+  divida:
+    name: divida operacional na linha-de-base
+    needs: [resolver, compute]
+    if: always() && needs.resolver.outputs.precisa == 'true' && inputs.sha == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      # Checkout do PROPRIO repositorio publico, e so dele: o veredito mora em
+      # `.github/scripts/leiloai-veredito-divida.sh`, que tem provas e mutantes
+      # em `testar-veredito-divida.sh`. A regra da seccao 41.1 e sobre nao
+      # correr codigo PRIVADO na VM que carrega o PAT; este codigo e o deste
+      # ficheiro, ja confiavel, e inline-lo aqui criaria uma SEGUNDA expressao
+      # da mesma regra, que diverge da testada com o tempo.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Publicar veredito da divida operacional
+        env:
+          GH_TOKEN: ${{ secrets.LEILOAI_STATUS_PAT }}
+          SHA: ${{ needs.resolver.outputs.sha }}
+          N: ${{ needs.compute.outputs.divida }}
+          LIDA: ${{ needs.compute.outputs.divida_lida }}
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::sha invalido"; exit 1; }
+
+          veredito="$(bash .github/scripts/leiloai-veredito-divida.sh "${N:-}" "${LIDA:-false}")"
+          ESTADO="$(printf '%s' "$veredito" | grep -oE '^estado=.*' | cut -d= -f2)"
+          DESCR="$(printf '%s' "$veredito" | grep -oE '^motivo=.*' | cut -d= -f2-)"
+          [ -n "$ESTADO" ] || { echo "::error::veredito sem estado"; exit 1; }
+          if [ "${LIDA:-false}" = "true" ]; then N_MOSTRA="${N:-?}"; else N_MOSTRA="nao medida"; fi
+
+          echo "DIVIDA_OPERACIONAL n=$N_MOSTRA veredito=$ESTADO sha=${SHA:0:8}"
+
+          if [ "$PUBLICAR_STATUS" != "true" ]; then
+            echo "SHADOW: nada foi escrito no repositorio privado"
+            exit 0
+          fi
+
+          gh api -X POST "repos/$REPO_PRIVADO/statuses/$SHA" \
+            -f state="$ESTADO" \
+            -f context="$CONTEXTO_DIVIDA" \
+            -f description="$DESCR" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --jq '"publicado: \(.context) = \(.state)"'
+
+          {
+            echo "private_sha=$SHA"
+            echo "divida_operacional=$N_MOSTRA"
+            echo "veredito_divida=$ESTADO"
           } >> "$GITHUB_STEP_SUMMARY"
