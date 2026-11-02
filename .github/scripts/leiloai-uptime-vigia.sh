@@ -53,8 +53,13 @@
 # segue fora, comenta no maximo 1x por hora.
 #
 # RECUPERACAO: ao voltar, comenta e FECHA a issue. Sem isto o quadro fica
-# vermelho para sempre e deixa de ser sinal: em 02/11/2026 havia 15 issues
-# `incident` abertas, de 16, 20 e 23/10, todas ja resolvidas havia dias.
+# vermelho para sempre e deixa de ser sinal: em 02/11/2026 havia 252 issues
+# `incident` abertas, a mais recente de 23/10, todas ja resolvidas havia dias.
+#
+# E o 252 corrige um numero meu: eu tinha escrito 15, que era o tamanho do
+# `head` da minha listagem, e nao o tamanho da populacao. O recorte decide o
+# que se ve, e eu reportei a janela em vez do conjunto. A contagem certa sai
+# de `search/issues ... total_count`.
 #
 # ============================================================================
 # O QUE ESTE SCRIPT NUNCA IMPRIME
@@ -161,9 +166,23 @@ numero_da_issue() {
     [ "$abriu" -gt "$fechou" ] && echo 1
     return 0
   fi
+  # `--arg` NAO EXISTE no `gh issue list`. A primeira versao passava
+  # `--jq '... == $t ...' --arg t "$titulo"`, o `gh` recusava a bandeira, a
+  # saida vinha VAZIA e vazio aqui quer dizer "nao ha incidente aberto". Ou
+  # seja: o dedup e a recuperacao ficavam desligados, calados, so no caminho
+  # real. Medido no ensaio com o token de verdade em 02/11/2026: quatro issues
+  # abertas para o mesmo alvo onde devia haver uma, e nenhuma fechada na volta.
+  #
+  # O teste de unidade NAO pegava isto, e nao por descuido: ele exercita o
+  # diario em ficheiro, que e o outro ramo desta mesma funcao. Guarda que so
+  # exercita o ramo barato aprova o caro sem o ter visitado, e por isso o
+  # ensaio com o token real existe.
+  #
+  # Agora o `jq` e o de verdade, que aceita `--arg`, e o `gh` so entrega JSON.
   gh issue list --repo "$REPO" --label leiloai-uptime --state open --limit 100 \
-     --json number,title --jq ".[] | select(.title == \$t) | .number" \
-     --arg t "$titulo" 2>/dev/null | head -1
+     --json number,title 2>/dev/null \
+    | jq -r --arg t "$titulo" '.[] | select(.title == $t) | .number' 2>/dev/null \
+    | head -1
 }
 
 abrir_ou_comentar() {
