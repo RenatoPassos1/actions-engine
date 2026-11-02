@@ -153,7 +153,9 @@ registrar() {
 
 # Imprime o numero da issue aberta daquele alvo, ou nada.
 numero_da_issue() {
-  local titulo="$1"
+  local slug="$1"
+  local titulo
+  titulo="$(titulo_de "$slug")"
   if [ "$SEM_GITHUB" = "1" ]; then
     [ -n "$DIARIO" ] || return 0
     local abriu fechou
@@ -178,7 +180,22 @@ numero_da_issue() {
   # exercita o ramo barato aprova o caro sem o ter visitado, e por isso o
   # ensaio com o token real existe.
   #
-  # Agora o `jq` e o de verdade, que aceita `--arg`, e o `gh` so entrega JSON.
+  # PRIMEIRO O QUE ESTA SESSAO SABE, e so depois a API. Medido no segundo
+  # ensaio com token real, em 02/11/2026: mesmo com o `jq` certo, consultar a
+  # listagem logo apos criar devolvia VAZIO, e o vigia abria outra issue. Em
+  # producao as rodadas distam 120 s e a latencia nao apareceria; em ensaio
+  # correm coladas e aparece. Preferir o estado local tira a dependencia da
+  # latencia da listagem nos dois casos.
+  #
+  # O ramo da API continua, e e o que importa quando a corrida e NOVA: maquina
+  # nova, estado local vazio, e um incidente aberto pela corrida anterior que
+  # nao pode virar duplicata nem ficar aberto para sempre.
+  local guardado="$ESTADO/$slug.issue"
+  if [ -s "$guardado" ]; then
+    cat "$guardado"
+    return 0
+  fi
+  # O `jq` aqui e o de verdade, que aceita `--arg`; o `gh` so entrega JSON.
   gh issue list --repo "$REPO" --label leiloai-uptime --state open --limit 100 \
      --json number,title 2>/dev/null \
     | jq -r --arg t "$titulo" '.[] | select(.title == $t) | .number' 2>/dev/null \
@@ -189,7 +206,7 @@ abrir_ou_comentar() {
   local slug="$1" url="$2" cod="$3" motivo="$4"
   local titulo n corpo ultimo agora_s
   titulo="$(titulo_de "$slug")"
-  n="$(numero_da_issue "$titulo")"
+  n="$(numero_da_issue "$slug")"
   if [ -n "$n" ]; then
     ultimo=$(cat "$ESTADO/$slug.comentou" 2>/dev/null || echo 0)
     agora_s=$(agora)
@@ -217,18 +234,21 @@ abrir_ou_comentar() {
   diz "  ABRE incidente para $slug"
   registrar "ABRIU|$titulo"
   [ "$SEM_GITHUB" = "1" ] && return 0
+  # O numero criado fica GUARDADO, e e ele que o dedup le na rodada seguinte.
+  # `gh issue create` imprime a URL da issue; o numero e o ultimo segmento.
   gh issue create --repo "$REPO" --title "$titulo" \
-     --label incident --label leiloai-uptime --body "$corpo" > /dev/null
+     --label incident --label leiloai-uptime --body "$corpo" 2>/dev/null \
+    | grep -oE '[0-9]+$' | head -1 > "$ESTADO/$slug.issue"
 }
 
 fechar_incidente() {
   local slug="$1" titulo n
   titulo="$(titulo_de "$slug")"
-  n="$(numero_da_issue "$titulo")"
+  n="$(numero_da_issue "$slug")"
   [ -z "$n" ] && return 0
   diz "  FECHA incidente de $slug (recuperado)"
   registrar "FECHOU|$titulo"
-  rm -f "$ESTADO/$slug.comentou"
+  rm -f "$ESTADO/$slug.comentou" "$ESTADO/$slug.issue"
   [ "$SEM_GITHUB" = "1" ] && return 0
   gh issue close "$n" --repo "$REPO" \
      --comment "Recuperado: $DEBOUNCE sondagens seguidas no estado esperado. $(carimbo)" > /dev/null
