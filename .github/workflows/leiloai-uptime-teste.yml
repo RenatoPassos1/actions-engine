@@ -1,0 +1,31 @@
+# Exercita o vigia de uptime quando ele, a tabela de alvos ou o proprio teste
+# mudam. O teste nao toca leiloai.com nem a API do GitHub: sobe um servidor
+# local, aponta para uma porta morta para simular queda, e afere o diario.
+name: "LeiloAI: teste do vigia de uptime"
+
+on:
+  push:
+    paths:
+      - ".github/scripts/leiloai-uptime-vigia.sh"
+      - ".github/scripts/leiloai-uptime-alvos.tsv"
+      - ".github/scripts/testar-uptime-vigia.sh"
+      - ".github/workflows/leiloai-uptime-teste.yml"
+  pull_request:
+    paths:
+      - ".github/scripts/leiloai-uptime-vigia.sh"
+      - ".github/scripts/leiloai-uptime-alvos.tsv"
+      - ".github/scripts/testar-uptime-vigia.sh"
+      - ".github/workflows/leiloai-uptime-teste.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  teste:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - name: Tres transicoes e tres controlos
+        run: bash .github/scripts/testar-uptime-vigia.sh

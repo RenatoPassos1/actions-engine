@@ -1,15 +1,45 @@
-# LeiloAI - Uptime Check: substitui UptimeRobot com GitHub Actions nativo.
-# Pinga URLs publicas criticas a cada 5 minutos.
-# Abre issue (label "incident") se qualquer endpoint cai por 2 checks consecutivos.
+# ============================================================================
+# LeiloAI - vigia externo do HTTP publico.
+# ============================================================================
 #
-# Zero custo, zero token externo. Alternativa free-tier-safe a UptimeRobot.
+# Externo de proposito: o monitor que vive na VPS (`scripts/vps/monitor-leiloai.sh`)
+# morre junto com ela, e foi o que aconteceu em 21/10/2026. Este corre no
+# GitHub, fora da infraestrutura vigiada.
+#
+# POR QUE UM LACO LONGO E NAO UM CRON CURTO: o `*/5` abaixo continua declarado,
+# mas ele NAO governa a cadencia. Medido em 02/11/2026 sobre as 200 corridas
+# mais recentes: intervalo mediano de 275 min e maior intervalo de 617 min, com
+# 3 a 8 corridas por dia em vez das 288 pedidas. E nao e deste workflow: o
+# `leiloai-indexnow-hourly` (declara `0 * * * *`) deu 283 min de mediana e o
+# `leiloai-cron-monitor` (declara `*/30`) deu 284 min. Tres cadencias
+# declaradas, uma cadencia real. Este repositorio tem 40 workflows com
+# `schedule:` e o agendador do GitHub entrega ~5 eventos por dia.
+#
+# Entao o job NAO termina depois de uma sondagem: ele fica ~5h30 sondando de 2
+# em 2 minutos. Com `cancel-in-progress: false`, a corrida seguinte espera na
+# fila e assume quando esta acabar. O agendador so precisa acertar uma vez a
+# cada 5h30.
+#
+# A logica toda vive em `.github/scripts/leiloai-uptime-vigia.sh`, com teste
+# em `testar-uptime-vigia.sh`: codigo num `run:` de YAML nao tem como ser
+# exercitado antes de ir para producao.
+# ============================================================================
 
 name: "LeiloAI: Uptime Check"
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # a cada 5 minutos (mesmo intervalo do UptimeRobot free)
+    - cron: '*/5 * * * *'
   workflow_dispatch:
+    inputs:
+      minutos:
+        description: "Duracao do laco em minutos (o tecto do job e 350)"
+        required: false
+        default: "330"
+      ensaio:
+        description: "sim = ensaio de entrega: abre e fecha uma issue REAL contra um servidor local, e nao vigia producao"
+        required: false
+        default: "nao"
 
 permissions:
   issues: write
@@ -20,89 +50,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
+  vigia:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - { slug: home,        url: 'https://leiloai.com/',                    espera: '200' }
-          - { slug: painel,      url: 'https://leiloai.com/painel',              espera: '307' } # redirect /entrar
-          - { slug: sitemap,     url: 'https://leiloai.com/sitemap.xml',         espera: '200' }
-          - { slug: api-v1,      url: 'https://leiloai.com/api/v1',              espera: '200' }
-          - { slug: planos,      url: 'https://leiloai.com/planos',              espera: '200' }
-          - { slug: blog,        url: 'https://leiloai.com/blog',                espera: '200' }
-          - { slug: funcionalidades, url: 'https://leiloai.com/funcionalidades', espera: '200' }
-
+    timeout-minutes: 350
     steps:
-      - name: Pinga ${{ matrix.target.slug }}
-        id: ping
-        continue-on-error: true
-        run: |
-          set +e
-          CODE=$(curl -sS --max-time 15 -o /tmp/body.txt -w '%{http_code}' \
-            -A "LeiloAI-Uptime/1.0 (+https://leiloai.com)" \
-            "${{ matrix.target.url }}" || echo "000")
-          echo "code=$CODE" >> "$GITHUB_OUTPUT"
-          EXPECT="${{ matrix.target.espera }}"
-          if [ "$CODE" = "$EXPECT" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-            echo "OK [$CODE] ${{ matrix.target.url }}"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "FAIL [$CODE esperado $EXPECT] ${{ matrix.target.url }}"
-            head -c 200 /tmp/body.txt || true
-          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
 
-      - name: Abre issue se caiu
-        if: steps.ping.outputs.ok != 'true'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+      # ENSAIO DE ENTREGA: o roteiro de teste contra um servidor local, mas com
+      # o token de verdade, abrindo e fechando uma issue real. E o unico jeito
+      # de provar que o alerta ENTREGA, e nao so que detecta. Nao toca
+      # leiloai.com e nao vigia nada: quando corre, o passo seguinte nao corre.
+      - name: Ensaio de entrega (abre e fecha issue real)
+        if: github.event.inputs.ensaio == 'sim'
         env:
-          # Tudo por `env:`, nada interpolado dentro do `script:`.
-          #
-          # `steps.ping.outputs.code` e o mais perigoso dos quatro: vem de um
-          # `curl` contra host externo, ou seja, quem responde escolhe o valor.
-          # Interpolado como texto dentro do JS, uma aspa simples na resposta
-          # fecharia a string e o resto viraria codigo rodando com o token do
-          # job. Apontado por review em 21/08/2026.
-          SLUG: ${{ matrix.target.slug }}
-          URL_ALVO: ${{ matrix.target.url }}
-          CODE: ${{ steps.ping.outputs.code }}
-          ESPERADO: ${{ matrix.target.espera }}
-        with:
-          script: |
-            const dia = new Date().toISOString().slice(0, 10);
-            const limpo = (v, re) => (re.test(String(v ?? '')) ? String(v) : '?');
-            const slug = limpo(process.env.SLUG, /^[A-Za-z0-9._-]{1,60}$/);
-            const url = limpo(process.env.URL_ALVO, /^https?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]{1,300}$/);
-            const code = limpo(process.env.CODE, /^[0-9]{3}$/);
-            const esperado = limpo(process.env.ESPERADO, /^[0-9]{3}$/);
-            const titulo = `[incident] uptime ${slug} fora ${dia}`;
-            const corpo = [
-              `URL ${url} respondeu HTTP ${code} (esperado ${esperado}).`,
-              ``,
-              `Detectado em: ${new Date().toISOString()}`,
-              `Workflow: leiloai-uptime-check`,
-              ``,
-              `Dedup: uma issue por dia por slug. Feche manualmente quando resolvido.`,
-            ].join('\n');
+          GH_TOKEN: ${{ github.token }}
+          UPTIME_REPO: ${{ github.repository }}
+          UPTIME_SEM_GITHUB: "0"
+        run: bash .github/scripts/testar-uptime-vigia.sh
 
-            const { data: existentes } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: 'incident',
-              state: 'open',
-              per_page: 100,
-            });
-            if (existentes.find(i => i.title === titulo)) {
-              console.log('Issue do dia ja existe, ignorando dedup.');
-              return;
-            }
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: titulo,
-              body: corpo,
-              labels: ['incident', 'leiloai-uptime'],
-            });
+      - name: Vigia o HTTP publico
+        if: github.event.inputs.ensaio != 'sim'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPTIME_REPO: ${{ github.repository }}
+          UPTIME_MINUTOS: ${{ github.event.inputs.minutos || '330' }}
+        run: bash .github/scripts/leiloai-uptime-vigia.sh vigia
