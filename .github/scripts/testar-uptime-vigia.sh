@@ -117,8 +117,26 @@ rodar() {
 # um SEGUNDO zero e a comparacao virava "0" contra "0\n0". O `head -1` fecha.
 conta() { grep -c -x -F "$1" "$TMP/diario" 2> /dev/null | head -1; }
 
-# Cada cenario comeca do zero: diario E contadores de debounce.
-zerar() { : > "$TMP/diario"; rm -rf "$TMP/estado"; mkdir -p "$TMP/estado"; }
+# Cada cenario comeca do zero: diario, contadores de debounce E, no ensaio com
+# token real, a issue que o cenario anterior deixou aberta no GitHub.
+#
+# Sem esta ultima parte, os cenarios 5 e 6 reprovavam por motivo errado: o
+# diario zerado dizia "nenhum incidente aberto", o GitHub dizia "ha um", e o
+# vigia COMENTAVA em vez de abrir. Contagem de ABRIU=0 com o produto certo.
+zerar() {
+  : > "$TMP/diario"
+  rm -rf "$TMP/estado"
+  mkdir -p "$TMP/estado"
+  [ "$SEM_GH" = "1" ] && return 0
+  local n
+  for n in $(gh issue list --repo "${UPTIME_REPO:-$GITHUB_REPOSITORY}" \
+                --label leiloai-uptime --state open --limit 50 --json number,title 2>/dev/null \
+             | jq -r '.[] | select(.title == "[uptime] ensaio fora do ar") | .number'); do
+    gh issue close "$n" --repo "${UPTIME_REPO:-$GITHUB_REPOSITORY}" \
+       --comment "Fecho de limpeza entre cenarios do ensaio." > /dev/null 2>&1
+  done
+  return 0
+}
 
 MARCA="MARCADOR-DE-ENSAIO-UPTIME"
 PAGINA_BOA="<html><body>$MARCA</body></html>"
