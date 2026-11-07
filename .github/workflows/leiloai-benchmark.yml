@@ -1,4 +1,4 @@
-# LeilôAI: Benchmark Orchestrator — dispara suites de benchmark de IA no
+# LeilôAI: Benchmark de IA, dispara suites de benchmark no
 # runner publico, sob demanda (W3, briefing secao 109B).
 #
 # ============================================================================
@@ -37,11 +37,30 @@
 # mesma usada la: um objeto neste repositorio (aqui um BLOB, nao uma tag
 # anotada, porque nao ha commit externo para o ref apontar) e um ref proprio,
 # `refs/leiloai-benchmark-results/<suite>-<sha>`. Suite e sempre um id
-# generico (ex: orchestrator-smoke) — nunca nome de fonte de coleta (LEI No 2
+# generico (ex: "<suite>-smoke"), nunca nome de alvo do registro (LEI No 2
 # do repositorio privado). SHA e opaco, 40 hex, sem significado fora de la.
 # Quem le nao precisa de credencial nenhuma: o repositorio e publico.
 
-name: "LeilôAI: Benchmark Orchestrator"
+# POR QUE O TITULO NAO NOMEIA O QUE E BENCHMARKADO
+#
+# Ate 07/11/2026 esta linha e a primeira do ficheiro traziam um slug do
+# registro privado de automacao. Nao e nome decorativo: o registro monta
+# `https://leiloai-<slug>.<conta>.workers.dev` a partir dele, logo o token
+# compoe hostname de worker vivo, e a SOURCE_CONFIDENTIALITY_POLICY do
+# repositorio privado lista "slugs internos" e "endpoints" como
+# confidencial. Ficou 47 dias aqui: entrou em 2026-09-21, junto com o
+# proprio ficheiro, e log e artefacto deste repositorio sao leitura aberta.
+#
+# A convencao do projeto ja era referenciar tarefa por NUMERO opaco, nunca
+# por slug, e os outros workflows deste repositorio a cumprem. Este nao.
+#
+# A ironia, medida: o comentario acima ja declarava "nunca nome de fonte de
+# coleta", e o titulo do proprio workflow carregava um slug do registro.
+# Declaracao em prosa nao se verifica sozinha, e foi isso que falhou aqui:
+# quem lesse o ficheiro leria a regra certa ao lado da violacao dela. Por
+# isso o conserto vem com trava que REPROVA neste repositorio, e nao com
+# mais uma frase de cuidado.
+name: "LeilôAI: Benchmark de IA"
 
 on:
   workflow_dispatch:
